@@ -24,6 +24,7 @@ from dataclasses import dataclass, field
 from .kickmix import CNOT, Circuit, SWAP, Toffoli, X, Z
 from .sandbox import evaluate_candidate, VerificationReport
 from .library import Candidate, increment_spec, build_increment_ancilla_reference
+from .novelty import InnovationCertificate, certify_innovation
 
 
 # ---------------------------------------------------------------------------
@@ -165,10 +166,11 @@ def generator_to_candidate(gen, track: str = "B") -> Candidate:
 class ArchiveEntry:
     candidate: Candidate
     report: VerificationReport
-    toffoli_max: int
-    depth_max: int
-    gate_max: int
-    width_max: int
+    certificate: InnovationCertificate | None = None
+    toffoli_max: int = 0
+    depth_max: int = 0
+    gate_max: int = 0
+    width_max: int = 0
 
 
 def niche_key(rep: VerificationReport) -> tuple[int, int]:
@@ -182,13 +184,13 @@ class MAPelitesArchive:
     def __init__(self):
         self.niches: dict[tuple, ArchiveEntry] = {}
 
-    def try_insert(self, cand: Candidate, rep: VerificationReport) -> bool:
+    def try_insert(self, cand: Candidate, rep: VerificationReport, certificate: InnovationCertificate | None = None) -> bool:
         if not rep.passed:
             return False
         m = rep.sizes[-1] if rep.sizes else 0
         key = niche_key(rep)
         entry = ArchiveEntry(
-            cand, rep,
+            cand, rep, certificate,
             rep.toffoli.get(m, 0), rep.depth.get(m, 0),
             rep.gate_count.get(m, 0), rep.peak_qubits.get(m, 0),
         )
@@ -223,6 +225,8 @@ def _better(new: ArchiveEntry, cur: ArchiveEntry) -> bool:
 @dataclass
 class DiscoveryResult:
     invented: list = field(default_factory=list)
+    certified: list = field(default_factory=list)  # triple-gated (correct x valuable x novel)
+    certificates: dict = field(default_factory=dict)  # candidate id -> InnovationCertificate
     attempts: int = 0
     succeeded: bool = False
     trace: list = field(default_factory=list)
@@ -256,24 +260,42 @@ def run_discovery(
             rep = evaluate_candidate(cand, sizes=sizes)
             res.attempts += 1
             if rep.passed:
-                inserted = archive.try_insert(cand, rep)
-                m = rep.sizes[-1]
-                trace.append(
-                    f"PASS{' NEW-NICHE' if inserted else ' dominated'} {gen.__name__}: "
-                    f"w={rep.peak_qubits.get(m)} t={rep.toffoli.get(m)} "
-                    f"g={rep.gate_count.get(m)} d={rep.depth.get(m)}"
-                )
+                cert = certify_innovation(cand, report=rep)
+                res.certificates[cand.id] = cert
+                if cert.certified:
+                    inserted = archive.try_insert(cand, rep, cert)
+                    m = rep.sizes[-1]
+                    trace.append(
+                        f"PASS{' NEW-NICHE' if inserted else ' dominated'} {gen.__name__}: "
+                        f"w={rep.peak_qubits.get(m)} t={rep.toffoli.get(m)} "
+                        f"g={rep.gate_count.get(m)} d={rep.depth.get(m)} "
+                        f"| CERTIFIED correct+valuable+novel"
+                    )
+                else:
+                    failed_gates = [
+                        g for g, ok in (
+                            ("correct", cert.correct), ("valuable", cert.valuable), ("novel", cert.novel),
+                        ) if not ok
+                    ]
+                    trace.append(
+                        f"PASS-SANDBOX BUT UNCERTIFIED {gen.__name__}: "
+                        f"fails [{' & '.join(failed_gates)}] — {cert.reasons[:1]}"
+                    )
             else:
                 trace.append(f"FAIL {gen.__name__}: {rep.failure_reasons[:2]}")
 
     res.invented = archive.all_passed()
+    res.certified = [e for e in res.invented if e.certificate is not None and e.certificate.certified]
     if mode == "necessity":
-        res.succeeded = len(res.invented) > 0
+        res.succeeded = len(res.certified) > 0
     else:
         ref = build_increment_ancilla_reference(sizes[-1])
         ref_profile = (ref.n, ref.toffoli_count())
         res.succeeded = any(
-            (e.width_max, e.toffoli_max) <= ref_profile for e in res.invented
-        ) and len(res.invented) > 0
+            e.certificate is not None
+            and e.certificate.certified
+            and (e.width_max, e.toffoli_max) <= ref_profile
+            for e in res.invented
+        ) and len(res.certified) > 0
     res.trace = trace
     return res

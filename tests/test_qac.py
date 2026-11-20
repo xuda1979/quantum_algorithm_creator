@@ -37,6 +37,8 @@ from qac.track_b import (
 )
 from qac.problem import IRKind, ProblemIR, triage
 from qac.portfolio import run_agent
+from qac.novelty import InnovationCertificate, certify_innovation
+from qac.library import increment_candidate_ancilla as _inc_cand
 
 
 # ===========================================================================
@@ -519,3 +521,125 @@ class TestDesignInvariants:
         cli.demo_increment()
         cli.demo_opportunity()
         cli.demo_reject()
+
+
+# ===========================================================================
+# Triple innovation gate: correct x valuable x novel, none optional
+# ===========================================================================
+
+class TestInnovationCertificate:
+    """Positive control: the lean interleaved incrementer passes all three
+    gates; each negative control fails exactly the gate it violates."""
+
+    def _certify(self, gen, **kw):
+        cand = generator_to_candidate(gen)
+        rep = evaluate_candidate(cand, sizes=(3, 4, 5))
+        return cand, rep, certify_innovation(cand, report=rep, **kw)
+
+    def test_positive_control_triple_certified(self):
+        _, _, cert = self._certify(_lean_interleaved_increment)
+        assert cert.correct, cert.reasons
+        assert cert.valuable, cert.reasons
+        assert cert.novel, cert.reasons
+        assert cert.certified
+        assert cert.novelty_verdict == "distinct"
+        assert "width" in cert.pareto_strict_axes  # saves a qubit at every size
+        assert "known:increment-ancilla" in cert.dominated_baselines
+
+    def test_duplicate_of_known_is_not_novel(self):
+        # Correct AND (weakly) valuable — but it IS the library circuit:
+        # novelty gate must reject it as a re-derivation.
+        _, _, cert = self._certify(build_increment_ancilla_reference)
+        assert cert.correct
+        assert not cert.novel
+        assert not cert.certified
+        assert "duplicate_of:known:increment-ancilla" == cert.novelty_verdict
+
+    def test_correct_but_valueless_is_rejected(self):
+        # A correct, distinct circuit that is strictly WORSE than the known
+        # baseline (one wasted idle ancilla on top of the textbook reference,
+        # no compensating win on any axis): not valuable -> not certified.
+        def _padded_reference(n: int) -> Circuit:
+            base = build_increment_ancilla_reference(n)
+            return Circuit(base.n + 1, list(base.gates))
+
+        cand = Candidate(
+            "invented:padded", "B", _padded_reference,
+            increment_spec, lambda n: n,
+            lambda n: list(range(n, _padded_reference(n).n)),
+        )
+        rep = evaluate_candidate(cand, sizes=(3, 4, 5))
+        assert rep.passed  # sandbox-correct...
+        cert = certify_innovation(cand, report=rep)
+        assert cert.correct  # ...and correct...
+        assert not cert.valuable  # ...but Pareto-dominated: no value
+        assert not cert.certified
+
+    def test_wrong_function_is_not_correct(self):
+        def _decrement_disguised(n: int) -> Circuit:
+            from qac.library import build_decrement_wrap_reference
+            return build_decrement_wrap_reference(n)
+
+        cand = Candidate(
+            "invented:fake", "B", _decrement_disguised,
+            increment_spec, lambda n: n,
+            lambda n: list(range(n, 2 * n - 1)) if n > 1 else [],
+        )
+        rep = evaluate_candidate(cand, sizes=(3, 4, 5))
+        assert not rep.passed
+        cert = certify_innovation(cand, report=rep)
+        assert not cert.correct
+        assert not cert.certified
+
+    def test_extended_sizes_verified_beyond_campaign(self):
+        _, _, cert = self._certify(_lean_interleaved_increment)
+        assert set((2, 3, 4, 5, 6)).issubset(set(cert.extended_sizes))
+
+    def test_discovery_result_exposes_certified_subset(self):
+        res = run_discovery(sizes=(3, 4, 5), mode="opportunity", seed=0, max_batches=2)
+        assert res.certified
+        for e in res.certified:
+            assert e.certificate is not None and e.certificate.certified
+            assert e.candidate.id in res.certificates
+
+    def test_portfolio_inventions_are_all_triple_certified(self):
+        ir = ProblemIR(
+            IRKind.ARITHMETIC, known_template="increment",
+            notes={"library_key": "increment", "resource_bottleneck": True},
+        )
+        res = run_agent("triple gate", ir, sizes=(3, 4, 5), seed=7)
+        invented = [e for e in res.portfolio if e.provenance == "invented"]
+        assert invented, "certified invention must still be delivered"
+        for e in invented:
+            assert e.certificate is not None
+            assert e.certificate.certified
+            assert e.certificate.correct and e.certificate.valuable and e.certificate.novel
+
+    def test_uncertified_never_reaches_portfolio(self):
+        # A mutator whose only proposal is a re-derivation of the known
+        # circuit: sandbox-correct, but the portfolio must stay clean.
+        class _DupMutator:
+            def propose(self, trace=None, batch_size=2):
+                return [build_increment_ancilla_reference]
+
+        ir = ProblemIR(IRKind.ARITHMETIC, known_template=None)  # necessity mode
+        res = run_agent(
+            "duplicate mutator", ir, sizes=(3, 4, 5),
+            track_b_budget=1,
+        )
+        # run_agent uses MutatorStandIn; exercise the gate directly instead:
+        discovery = run_discovery(
+            mutator=MutatorStandIn(pool=[build_increment_ancilla_reference]),
+            sizes=(3, 4, 5), mode="necessity", max_batches=1,
+        )
+        assert discovery.attempts == 1
+        assert not discovery.certified, "a duplicate of a known algorithm is not an invention"
+        assert any("UNCERTIFIED" in t or "FAIL" in t for t in discovery.trace)
+        assert res.delivered  # sanity: the normal pipeline still delivers
+
+    def test_certificate_json_serializable(self):
+        import json
+
+        _, _, cert = self._certify(_lean_interleaved_increment)
+        blob = json.dumps(cert.to_dict())
+        assert '"certified": true' in blob

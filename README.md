@@ -6,7 +6,10 @@
 >
 > - 如果问题能映射到已知 BQP 模板且满足资源预算，交付现有算法即为合格答案（Track A）。
 > - 当没有已知算法能满足预算（**必要性模式**），或预算允许在已知解之外探索帕累托更优的新解（**机会模式**），则启动进化式发现引擎尝试发明新算法（Track B）。
-> - 发明不是必须成功的任务：Track B 有时间与预算上限，失败时如实交付最优已知解并精确报告未突破的瓶颈；但**任何"新颖性"声明必须通过机器验证**——多尺寸正确性、辅助比特干净归零、无隐藏指数爆炸、与知识库中所有基线的帕累托对比。
+> - 发明不是必须成功的任务：Track B 有时间与预算上限，失败时如实交付最优已知解并精确报告未突破的瓶颈；但**任何"新颖性"声明必须通过机器验证的三重认证门（缺一不可）**：
+>   - **正确**——扩展尺寸区间上的穷举态矢量语义验证 + 独立 kickmix 交叉验证（两条代码路径、同一结论），辅助比特干净归零、无隐藏指数爆炸；
+>   - **有价值**——在每个验证尺寸上严格帕累托支配所有同规约已知基线（所有资源轴 ≤、至少一轴严格更优），或是无任何基线可解问题时的第一个解；
+>   - **真创新**——与所有同规约已知基线均不相同（门序列指纹 + 精确酉等价双重查重），对库的重新推导只能按"已知解"交付，绝不记作发明。
 > - 每个经发明并验证的子程序都会沉淀为可复用的 Qualtran `Bloq`，永久扩展系统能力边界。
 
 完整设计规范见 [AGENT_DESIGN.md](AGENT_DESIGN.md)。
@@ -174,7 +177,7 @@
 
 ## 本系统已发明的新量子算法（机器验证）
 
-本仓库不只是设计文档——`qac/` 目录包含了智能体的**可运行参考实现**（纯 Python + numpy，56 项测试全部通过），并且它**已经发明了一个经机器验证、帕累托超越教科书基线的新量子子程序**。以下算法由本系统的 Track B 发现引擎产出，全部通过 Layer-3 语义沙箱的穷举验证（n=1..7 每个输入 x 上：功能正确、辅助比特干净归零、无杂散相位、无隐藏指数爆炸）。
+本仓库不只是设计文档——`qac/` 目录包含了智能体的**可运行参考实现**（纯 Python + numpy，65 项测试全部通过），并且它**已经发明了一个经三重认证（正确 × 有价值 × 真创新）、帕累托超越教科书基线的新量子子程序**。以下算法由本系统的 Track B 发现引擎产出，全部通过 Layer-3 语义沙箱的穷举验证（n=1..7 每个输入 x 上：功能正确、辅助比特干净归零、无杂散相位、无隐藏指数爆炸），并持有 `qac/novelty.py` 签发的完整 `InnovationCertificate`。
 
 ### 发明 1：精简交错可逆增量器（Lean Interleaved Incrementer）
 
@@ -262,15 +265,15 @@ n=5 的完整门序列（数据 q0..q4，辅助 q5,q6,q7）：
 ### 复现方式
 
 ```bash
-python3 -m pytest tests/ -q          # 56 项测试全绿（含发明的帕累托优势断言）
+python3 -m pytest tests/ -q          # 65 项测试全绿（含三重认证门的正/负控制）
 python3 -m qac.cli                   # 端到端演示：必要性模式发明 / 机会模式混合组合 / 分诊拒绝
 ```
 
-演示输出（机会模式）——发明与已知算法**同台竞技、按资源排序、发明居首**：
+演示输出（机会模式）——发明与已知算法**同台竞技、按资源排序、发明居首**，且发明条目携带完整三重认证（正确 × 有价值 × 真创新，缺一不可）：
 
 ```text
 portfolio (2 solution(s), ranked):
- 1. [invented] invented:lean_interleaved_increment toffoli@5=6 gates@5=11 depth@5=11
+ 1. [invented] invented:lean_interleaved_increment toffoli@5=6 gates@5=11 depth@5=11 | certificate: correct=True valuable=True novel=True (strict wins: depth,gates,width; novelty: distinct)
  2. [known   ] known:increment-ancilla          toffoli@5=6 gates@5=13 depth@5=13
 ```
 
@@ -298,12 +301,13 @@ quantum_algorithm_creator/
 ├── qac/                   # 智能体参考实现（Layer 1-4 全部可运行）
 │   ├── kickmix.py         #   Layer 3a: 可逆/相位反冲快速模拟器
 │   ├── sandbox.py         #   Layer 3b: 语义验证 + 缩放拟合 + 评估契约
+│   ├── novelty.py         #   三重认证门: 正确 × 有价值 × 真创新（缺一不可）
 │   ├── library.py         #   Layer 2A: 已知算法库（GraphRAG 微缩版）
 │   ├── track_b.py         #   Layer 2B: MAP-Elites 进化发现引擎
 │   ├── problem.py         #   Layer 1: 形式化 IR + 经典分诊路由
 │   ├── portfolio.py       #   Layer 4: 排序解决方案组合 + 端到端流水线
 │   └── cli.py             #   演示入口
-└── tests/test_qac.py      # 56 项综合测试（全绿，0.4s）
+└── tests/test_qac.py      # 65 项综合测试（全绿）
 ```
 
 ## 许可与引用

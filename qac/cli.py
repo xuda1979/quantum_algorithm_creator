@@ -66,11 +66,19 @@ def _print(res) -> None:
     print(f"  portfolio ({len(res.portfolio)} solution(s), ranked):")
     for i, e in enumerate(res.portfolio, 1):
         m = e.report.sizes[-1]
-        print(
+        line = (
             f"   {i}. [{e.provenance:8s}] {e.candidate_id:32s} "
             f"toffoli@{m}={e.report.toffoli.get(m)} gates@{m}={e.report.gate_count.get(m)} "
             f"depth@{m}={e.report.depth.get(m)} fidelity@{m}={e.report.correctness.get(m)}"
         )
+        if e.provenance == "invented" and e.certificate is not None:
+            c = e.certificate
+            line += (
+                f" | certificate: correct={c.correct} valuable={c.valuable} novel={c.novel}"
+                f" (strict wins: {','.join(c.pareto_strict_axes) or '-'};"
+                f" novelty: {c.novelty_verdict})"
+            )
+        print(line)
 
 
 if __name__ == "__main__":

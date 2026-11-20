@@ -22,6 +22,7 @@ class PortfolioEntry:
     provenance: str  # "known" | "invented"
     report: VerificationReport
     score: tuple  # (toffoli@max_n, gates@max_n, depth@max_n) — lower is better
+    certificate: object = None  # InnovationCertificate for "invented" entries (triple gate)
 
 
 @dataclass
@@ -90,13 +91,25 @@ def run_agent(
         )
         result.track_b_trace = discovery.trace
         for entry in discovery.invented:
+            cert = entry.certificate
+            if cert is None or not cert.certified:
+                # Sandbox-correct but failed the triple gate (not valuable
+                # enough, or a duplicate of a known algorithm): never
+                # deliverable as an innovation.
+                if cert is not None:
+                    result.notes.append(
+                        f"Track B candidate '{entry.candidate.id}' excluded from portfolio: "
+                        f"failed innovation gate ({'; '.join(cert.reasons[:1])})"
+                    )
+                continue
             result.portfolio.append(
                 PortfolioEntry(
-                    entry.candidate.id, "B", "invented", entry.report, _entry_score(entry.report)
+                    entry.candidate.id, "B", "invented", entry.report,
+                    _entry_score(entry.report), cert,
                 )
             )
         if not discovery.succeeded:
-            result.notes.append("Track B: invention budget exhausted without success (acceptable).")
+            result.notes.append("Track B: invention budget exhausted without certified innovation (acceptable).")
 
     # ---- rank & tag ------------------------------------------------------
     result.portfolio.sort(key=lambda e: e.score)
