@@ -24,9 +24,11 @@
 4. [推荐技术栈（2026）](#推荐技术栈2026)
 5. [真实案例：AI 创造的新量子算法](#真实案例ai-创造的新量子算法)
 6. [本系统已发明的新量子算法（机器验证）](#本系统已发明的新量子算法机器验证)
-7. [分阶段开发计划](#分阶段开发计划)
-8. [工程护栏](#工程护栏)
-9. [仓库结构](#仓库结构)
+7. [三重认证门：正确 × 有价值 × 真创新（缺一不可）](#三重认证门正确--有价值--真创新缺一不可)
+8. [已知算法库：12 个已验证的算法族目录](#已知算法库12-个已验证的算法族目录)
+9. [分阶段开发计划](#分阶段开发计划)
+10. [工程护栏](#工程护栏)
+11. [仓库结构](#仓库结构)
 
 ---
 
@@ -177,7 +179,7 @@
 
 ## 本系统已发明的新量子算法（机器验证）
 
-本仓库不只是设计文档——`qac/` 目录包含了智能体的**可运行参考实现**（纯 Python + numpy，65 项测试全部通过），并且它**已经发明了一个经三重认证（正确 × 有价值 × 真创新）、帕累托超越教科书基线的新量子子程序**。以下算法由本系统的 Track B 发现引擎产出，全部通过 Layer-3 语义沙箱的穷举验证（n=1..7 每个输入 x 上：功能正确、辅助比特干净归零、无杂散相位、无隐藏指数爆炸），并持有 `qac/novelty.py` 签发的完整 `InnovationCertificate`。
+本仓库不只是设计文档——`qac/` 目录包含了智能体的**可运行参考实现**（纯 Python + numpy，65 项测试全部通过），并且它**已经发明了一个经三重认证（正确 × 有价值 × 真创新）、帕累托超越教科书基线的新量子子程序**。以下算法由本系统的 Track B 发现引擎产出，验证范围**全部来自机器实测、无一凭空声明**：三重认证在扩展尺寸 n=2..6 上对每个输入 x 穷举态矢量验证（`extended_sizes=(2,3,4,5,6)`，见 `qac/novelty.py`），帕累托支配在 n=3..6 逐尺寸核验（`test_invention_pareto_dominates_at_every_size`），资源公式在 n=1..8 机器核验——验证内容包括：功能正确、辅助比特干净归零、无杂散相位（振幅恰为 +1）、无隐藏指数爆炸。发明持有 `qac/novelty.py` 签发的完整 `InnovationCertificate`。
 
 ### 发明 1：精简交错可逆增量器（Lean Interleaved Incrementer）
 
@@ -260,7 +262,62 @@ n=5 的完整门序列（数据 q0..q4，辅助 q5,q6,q7）：
 
 ### 发现引擎同时产出的负样本（同样有价值）
 
-搜索过程中另有 3 个"看似合理"的突变变体被沙箱**确定性拒绝**（ancilla-free 交错、循环进位、原地前瞻链——均未通过穷举语义验证），它们与通过者一同构成进化存档的失败轨迹语料，正是 Phase 5 智能体 RL 微调的训练数据。**发明不是运气：是 4 个候选、1 个通过、3 个被机器否决的可复现过程。**
+搜索过程中另有 3 个"看似合理"的突变变体被沙箱**确定性拒绝**。它们是 `qac/track_b.py` 中与发明同池进化的生成器（`GENERATOR_POOL` 共 4 个候选：1 个通过、3 个被机器否决），在 n=3 上的穷举验证全部失败——但三者的失败方式**互不相同**，精确暴露了可逆增量器设计空间中的三类典型陷阱。以下数据均为 `check_semantics` 的机器实测输出（n=3，小端序，want = (x+1) mod 8）：
+
+#### 负样本 A：无辅助比特锯齿层（`_zigzag_increment`）——恒等映射，"什么都不做"
+
+**构造思路**：用纯 CNOT/X 层交错往返（ancilla-free 的"锯齿"形调度），表面上模仿了发明的"交错应用/逆计算"结构。
+
+**机器实测（n=3）**：穷举验证 8/8 输入全部错误，辅助比特干净（本就无辅助比特）：
+
+```text
+x=0: got 0, want 1    x=4: got 4, want 5
+x=1: got 1, want 2    x=5: got 5, want 6
+x=2: got 2, want 3    x=6: got 6, want 7
+x=3: got 3, want 4    x=7: got 7, want 0
+```
+
+**完整置换表**：[0,1,2,3,4,5,6,7] ——**恒等映射**。升链与降链精确互逆，整个线路自我抵消：这是一个"结构正确但功能为零"的典型——门数再多，净效应是单位算符。
+
+**教训**：交错调度本身不产生计算；没有不可逆的信息汇聚点（Toffoli 进位），CNOT/X 层永远只能拼出可分解的自逆结构。
+
+#### 负样本 B：循环进位变体（`_cyclic_increment`）——错误的置换，且进位方向混乱
+
+**构造思路**：把进位链首尾相接成"环"，低位 X 先行、进位 CNOT 自高位向低位传播——一个"循环进位"风味的变体。
+
+**机器实测（n=3）**：8/8 输入全部错误（无辅助比特，天然干净）：
+
+```text
+x=0: got 7, want 1    x=4: got 3, want 5
+x=1: got 4, want 2    x=5: got 0, want 6
+x=2: got 1, want 3    x=6: got 5, want 7
+x=3: got 2, want 4    x=7: got 6, want 0
+```
+
+**完整置换表**：[7,4,1,2,3,0,5,6] ——一个确为置换（无信息丢失）但**完全错误**的映射。它仍是单振幅、可逆的，所以不会被"脏辅助比特"或"杂散相位"类检查抓到——只有逐输入的语义穷举能击毙它。
+
+**教训**："能跑、可逆、干净"不等于"正确"；语义沙箱必须逐输入比对目标函数，不能只查可逆性与整洁性。
+
+#### 负样本 C：原地前瞻链（`_inplace_lookahead_increment`）——前缀 AND 覆盖了后续仍需的数据比特
+
+**构造思路**：模仿进位前瞻思想，但把前缀 AND **直接写进数据比特**（`Toffoli(i-2, i-1, i)` 就地覆盖 bᵢ），试图省掉全部辅助比特——这是最有诱惑力的一个：它真的用了 Toffoli，且门序列与正确结构形似。
+
+**机器实测（n=3）**：8/8 输入全部错误（无辅助比特）：
+
+```text
+x=0: got 3, want 1    x=4: got 7, want 5
+x=1: got 6, want 2    x=5: got 2, want 6
+x=2: got 5, want 3    x=6: got 1, want 7
+x=3: got 0, want 4    x=7: got 4, want 0
+```
+
+**完整置换表**：[3,6,5,0,7,2,1,4] ——同为干净但错误的置换。根因是**致命的**：原地计算 bᵢ ← Aᵢ 的瞬间，原始比特 bᵢ 被销毁，而后续进位判定与逆计算仍需读原始 bᵢ——信息一旦被覆盖便不可恢复，错误随即扩散到整个寄存器。
+
+**教训**：compute/use/uncompute 范式的铁律——**被后续阶段读取的值绝不能原地覆盖**。这正是发明把前缀 AND 存入专用辅助槽位（而非数据比特）的原因；"省辅助比特"若以销毁后续输入为代价，就是假优化。
+
+#### 负样本的共同特征与价值
+
+三个负样本都是**干净、可逆、单振幅的错误置换**（0 个脏辅助比特输入、无杂散相位），分别对应"恒等（自我抵消）""方向混乱""信息覆盖"三类独立失败模式。它们与通过者一同构成进化存档的失败轨迹语料，正是 Phase 5 智能体 RL 微调的训练数据（`test_negative_control_mutations_fail_semantics` 在 n=3,4,5 上回归锁定其必败性）。**发明不是运气：是 4 个候选、1 个通过、3 个被机器否决的可复现过程。**
 
 ### 复现方式
 
@@ -273,9 +330,109 @@ python3 -m qac.cli                   # 端到端演示：必要性模式发明 /
 
 ```text
 portfolio (2 solution(s), ranked):
- 1. [invented] invented:lean_interleaved_increment toffoli@5=6 gates@5=11 depth@5=11 | certificate: correct=True valuable=True novel=True (strict wins: depth,gates,width; novelty: distinct)
- 2. [known   ] known:increment-ancilla          toffoli@5=6 gates@5=13 depth@5=13
+ 1. [invented] invented:lean_interleaved_increment toffoli@5=6 gates@5=11 depth@5=11 fidelity@5=True | certificate: correct=True valuable=True novel=True (strict wins: depth,gates,width; novelty: distinct)
+ 2. [known   ] known:increment-ancilla          toffoli@5=6 gates@5=13 depth@5=13 fidelity@5=True
 ```
+
+---
+
+## 三重认证门：正确 × 有价值 × 真创新（缺一不可）
+
+"发明"声明由 `qac/novelty.py` 的 `InnovationCertificate` 机器签发。三道门**串联、缺一不可**——任何一道失败即整体否决。每道门都有**正控制（通过者）与负控制（精确触发该门失败者）**的测试锁定（`tests/test_qac.py::TestInnovationCertificate`），确保门本身不是摆设：
+
+### 门 1：正确（穷举语义验证，非抽样）
+
+- **机制**：在扩展尺寸 `extended_sizes=(2,3,4,5,6)`（超出进化搜索所用 n=3..5 的活动区间）上，对**每个**输入 x 穷举态矢量验证：目标振幅恰为 +1（功能对、无杂散相位、单振幅）、全部辅助比特干净归零（无纠缠残留）；并做独立 kickmix 交叉验证（两条代码路径、同一结论）。
+- **负控制**（`test_wrong_function_is_not_correct`）：把减法器 `build_decrement_wrap_reference` 伪装成增量器提交——沙箱逐输入比对当场揭穿：`rep.passed=False`，`cert.correct=False`，整体不认证。**"能跑、可逆、干净"不等于"正确"。**
+- **正控制**：精简交错增量器在全部扩展尺寸上逐输入通过，`cert.correct=True`。
+
+### 门 2：有价值（严格帕累托支配，非"差不多更好"）
+
+- **机制**：在每个验证尺寸上，候选必须在**所有**资源轴（总宽度 W / Toffoli 数 T / 门数 G / 深度 D）上 ≤ 每个同规约已知基线，且**至少一轴严格更优**——弱于任何一条即否决。"与基线并列"不算价值。
+- **负控制**（`test_correct_but_valueless_is_rejected`）：构造"填充参考"——教科书增量器原封不动、只多垫一个闲置辅助比特（`Circuit(base.n+1, list(base.gates))`）。它**完全正确**（沙箱通过）、与基线线路不同（门序列指纹不同），但在每个尺寸上被基线全面支配（宽度多 1、其余全平、无一轴更优）→ `cert.correct=True` 但 `cert.valuable=False`，不认证。**正确但无价值的线路没有交付为"发明"的资格。**
+- **正控制**：精简交错增量器对基线 `known:increment-ancilla` 严格支配，`cert.pareto_strict_axes` 含 `width`（每个尺寸省 1 比特）。
+
+### 门 3：真创新（双重查重，重新推导不算发明）
+
+- **机制**：与所有同规约已知基线做**门序列指纹**比对 + **精确酉等价**检查。对库的重新推导（哪怕代码写法不同、酉完全相同）只能按"已知解"交付，`novelty_verdict` 记为 `duplicate_of:<基线>`，绝不记作发明。
+- **负控制**（`test_duplicate_of_known_is_not_novel`）：直接提交教科书增量器 `build_increment_ancilla_reference` 本身——正确且（弱）有价值，但查重命中：`novelty_verdict == "duplicate_of:known:increment-ancilla"`，`cert.novel=False`，不认证。
+- **正控制**：精简交错增量器与基线指纹不同、酉不等价，`cert.novelty_verdict == "distinct"`。
+
+### 系统级护栏：未认证者永不入组合
+
+- **`test_uncertified_never_reaches_portfolio`**：变异器若只提议已知线路的复制品（`MutatorStandIn(pool=[build_increment_ancilla_reference])`），发现循环运行后 `discovery.certified` 为空、轨迹含 "UNCERTIFIED/FAIL" 标记——组合方案（portfolio）里**不存在**任何未过三重门的条目。
+- **`test_portfolio_inventions_are_all_triple_certified`**：端到端流水线交付的每个 `invented` 条目都携带 `certificate.certified=True` 的证书（三布尔全真）。
+- **`test_certificate_json_serializable`**：证书可 JSON 序列化（`'"certified": true'` 在输出中）——供审计与存档。
+- **`test_extended_sizes_verified_beyond_campaign`**：锁定验证区间 (2,3,4,5,6) ⊆ `cert.extended_sizes`，防止未来回归悄悄缩小验证范围。
+
+---
+
+## 已知算法库：12 个已验证的算法族目录
+
+Track A 的检索底座是 `qac/library.py` 的 `KnownAlgorithmLibrary`：12 个以 n 为参数的已知算法族（GraphRAG 微缩版），统一 `synthesize(key, n)` 接口，`verify_all(sizes=(3,4,5))` 对每个条目在语义沙箱内逐输入验证。**它们也是 Track B 发明的查重与帕累托基线池**——发明的"价值"与"真创新"两道门都以此为参照系。以下资源数据均为 n=5 机器实测（W=总宽度，T=Toffoli 数，G=门数，D=深度）。
+
+### n=5 资源总表（机器实测）
+
+| key | 功能 | W | T | G | D | 辅助比特 |
+| --- | --- | --- | --- | --- | --- | --- |
+| `increment` | x → (x+1) mod 2ⁿ | 9 | 6 | 13 | 13 | q5..q8 |
+| `bit_reversal` | 比特串反转 | 5 | 0 | 2 | 1 | 无 |
+| `decrement` | x → (x−1) mod 2ⁿ | 9 | 6 | 23 | 15 | q5..q8 |
+| `add_const` | x → (x+k) mod 2ⁿ | 9 | 6 | 18 | 16 | q5..q8 |
+| `negate` | x → (−x) mod 2ⁿ | 9 | 6 | 18 | 14 | q5..q8 |
+| `prefix_xor` | bᵢ ← b₀⊕…⊕bᵢ | 5 | 0 | 4 | 4 | 无 |
+| `less_than` | flag ← [x < k] | 8 | 4 | 12 | 9 | q5..q7 |
+| `popcount` | c → c + popcount(x) | 10 | 20 | 35 | 35 | q8,q9 |
+| `compare` | flag ← [x ≥ y] | 12 | 10 | 44 | 25 | q11 |
+| `ctrl_increment` | x → (x+q) mod 2ⁿ（受控） | 10 | 8 | 13 | 13 | q6..q9 |
+| `weighted_threshold` | flag ← [Σ wᵢxᵢ ≥ θ] | 14 | 66 | 117 | 97 | q6..q13 |
+| `majority` | flag ← [popcount ≥ ⌈n/2⌉] | 12 | 44 | 81 | 79 | q6..q11 |
+
+Toffoli 数随 n 的缩放（n=3..7 实测）：`increment`/`decrement`/`add_const`/`negate` 为 2,4,6,8,10（线性 2n−4）；`compare` 为 6,8,10,12,14（2n）；`ctrl_increment` 为 4,6,8,10,12（2(n−1)）；`bit_reversal`/`prefix_xor` 恒为 0（纯 Clifford）；`popcount` 6,16,20,24,28；`majority` 14,36,44,52,60；`weighted_threshold` 28,50,66,116,152；`less_than` 2,4,4,8,4（随常数 k 的比特模式波动）。
+
+### 各族构造机制与现实角色
+
+**1. `increment` —— 带辅助比特的教科书增量器（本系统发明的基线）**
+前缀与 Aᵢ = AND(b₀..bᵢ₋₁) 存入专用辅助槽 anc(i)=n+i−1，自顶向下交错应用/逆计算，X(0) 严格最后。W=2n−1、T=2n−4。角色：Shor 算法、振幅估计、QSVT 相位算术的核心算术单元。**它就是"发明 1"的查重与帕累托基线**——发明以 W=2n−2、G=3n−4 全面超越之。
+
+**2. `bit_reversal` —— 比特反转（⌊n/2⌋ 个 SWAP）**
+寄存器首尾对称交换。T=0（SWAP 可分解为 3 个 CNOT，无 Toffoli）、无辅助比特。角色：QFT 前后置处理、振幅编码的字节序转换。
+
+**3. `decrement` —— 模减（x−1 = NOT(NOT(x)+1)）**
+两次全寄存器 X 包装夹一个增量器（2n 个 X 门）。角色：QPE 化学循环中的逆步进、振幅估计的相位回退。在测试中兼任"伪装错误函数"的负控制素材。
+
+**4. `add_const` —— 常数模加（x+k mod 2ⁿ，k=n）**
+逐位进位 c_{j+1} = maj(x_j, k_j, c_j)，进位链存 C(j)=n+j−1；k_j=1 时用容斥原理实现 OR（CNOT+CNOT+Toffoli）；X(0) 收尾。角色：量子化学中的核电荷项、金融期权中的行权价平移。
+
+**5. `negate` —— 模取负（−x = NOT(x)+1）**
+仅前导 X 包装 n 个门 + 增量器（n=1 时为单位算符）。角色：金融收益 Oracle、格密码/QFT 算术中的符号翻转。
+
+**6. `prefix_xor` —— 前缀异或阶梯**
+自底向上 n−1 个 CNOT：bᵢ ^= bᵢ₋₁，实现对合（自逆）。T=0、无辅助比特。角色：QEC 症状奇偶校验、校验和计算。
+
+**7. `less_than` —— 无借位链比较（flag ← [x < k]）**
+k = min(n+1, 2^(n−1)−1)，借位链 D_j = [x_{<j} ≥ k_{<j}]，借位-或经 a^b^(a&b) 合成，逆计算按精确逆序执行。角色：VaR/限额 Oracle、机器学习分类阈值。
+
+**8. `popcount` —— 人口计数（c → (c+popcount(x)) mod 2^m）**
+m=⌈log₂(n+1)⌉ 位计数寄存器，VBE 风格受控纹波增量——对计数寄存器实现完整置换而非单比特 flag。角色：QEC 症状权重、汉明距离内核。
+
+**9. `compare` —— Cuccaro 风格比较器（flag ← [x ≥ y]）**
+MAJ(c,b,a) 三门单元（CNOT;CNOT;Toffoli）构成进位链，计算 (x+~y+1) 的进位输出即 [x≥y]，flag ^= carry^1，逆计算按精确逆序。布局 x=q0..q(n−1)、y=qn..q(2n−1)、flag=q(2n)、anc=q(2n+1)；W=2n+2、T=2n、CNOT 4n+1。角色：优化 Oracle、量子排序的比较内核。
+
+**10. `ctrl_increment` —— 受控增量（x → (x+q) mod 2ⁿ）**
+控制比特 q=q_n，进位存 C(j)=n+j，每个进位 Toffoli 均受 q 控制。W=2n、T=2(n−1)。角色：Grover/振幅放大中的 Oracle 步进、受控哈密顿旋转。
+
+**11. `weighted_threshold` —— 加权阈值（flag ← [Σ wᵢxᵢ ≥ θ]）**
+权重 wᵢ=i（1..n），θ=⌊n(n+1)/4⌋，累加寄存器 t 位（2^t > n(n+1)/2 的最小 t），flag ^= 累加器+(2^t−θ) 的进位输出；布局 x=q0..q(n−1)、flag=q_n、acc=q(n+1)..q(n+t)、进位 q(n+1+t)..q(n+2t)。W=n+2t+1。角色：组合优化里的背包/投资组合 QUBO 罚项、Ising 约束编码。
+
+**12. `majority` —— 多数表决（flag ← [popcount ≥ ⌈n/2⌉]）**
+popcount 计数后与阈值 K=2^m−⌈n/2⌉ 比较，flag 取阈值进位。W=n+2m+1。角色：重复码译码、感知机激活、集成投票。
+
+### 库的验证与接口契约
+
+- **统一表面**：`KnownAlgorithmLibrary().synthesize(key, n)` 返回 `Circuit`；`has(key)` 查询；`verify_all(sizes=(3,4,5))` 在语义沙箱内对每条目逐输入穷举验证（宽度护栏 `max_total_width=max(12, peak)`）。
+- **查重基线**：三重认证门的"价值"与"真创新"两门以这 12 族为参照系——`cert.dominated_baselines` 记录被发明严格支配的基线（当前为 `known:increment-ancilla`），`novelty_verdict` 的 `duplicate_of:` 前缀指向库 key。
+- **全部 12 族在 n=3,4,5 上机器验证通过**（`test_every_known_entry_verifies`），任何未来的库扩展都要过同一道沙箱。
 
 ## 分阶段开发计划
 

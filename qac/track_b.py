@@ -43,7 +43,7 @@ def _lean_interleaved_increment(n: int) -> Circuit:
 
     Verified exhaustively n=1..6 (sandbox + brute force):
       width 2n-2 vs library 2n-1  (one fewer qubit),
-      same 2n-4 Toffolis, 2 fewer CNOTs, depth 2n+1 vs 2n+3.
+      same 2n-4 Toffolis, gates/depth 3n-4 vs 3n-2.
     """
     if n == 1:
         return Circuit(1, [X(0)])
