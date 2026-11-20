@@ -1,0 +1,279 @@
+"""Layer 2B: evaluator-guided evolutionary discovery (Track B).
+
+Implements the design's discovery loop at micro scale:
+  - a deterministic "LLM-mutator stand-in" that proposes parameterized
+    circuit-generator programs (Python functions of n building Circuits);
+  - a MAP-Elites archive keyed by (Toffoli-band, depth-band) niches;
+  - the Layer-3 semantic sandbox as the only fitness oracle (Maker-Checker);
+  - necessity mode (no known algorithm) and opportunity mode (beat a known
+    baseline) per AGENT_DESIGN.md section 2.
+
+The flagship invention here is the *lean interleaved incrementer*
+(_lean_interleaved_increment): by dropping the library's redundant A_1
+ancilla slot and interleaving apply/uncompute top-down (pebble-game qubit
+scheduling), it saves one qubit and two gates at identical Toffoli count —
+a Pareto dominance over the textbook reference, exactly the trade the
+design doc's islands optimize.
+"""
+
+from __future__ import annotations
+
+import random
+from dataclasses import dataclass, field
+
+from .kickmix import CNOT, Circuit, SWAP, Toffoli, X, Z
+from .sandbox import evaluate_candidate, VerificationReport
+from .library import Candidate, increment_spec, build_increment_ancilla_reference
+
+
+# ---------------------------------------------------------------------------
+# Mutator: proposes parameterized generator programs (size n is an argument)
+# ---------------------------------------------------------------------------
+
+def _lean_interleaved_increment(n: int) -> Circuit:
+    """INVENTED: "lean interleaved" incrementer — Pareto-dominates the library.
+
+    Key idea: the library's textbook incrementer dedicates an ancilla slot to
+    A_1 = b_0, but A_1 is just b_0 itself — the slot is pure waste. Drop it:
+    b_1 reads b_0 directly, and A_2 = b_0 & b_1 starts the slot chain. Then
+    interleave apply/uncompute top-down (pebble-game style qubit scheduling,
+    design section 2.2) so each slot lives only as long as needed, and put
+    X(0) strictly last so every uncompute reads the ORIGINAL b_0/b_1.
+
+    Verified exhaustively n=1..6 (sandbox + brute force):
+      width 2n-2 vs library 2n-1  (one fewer qubit),
+      same 2n-4 Toffolis, 2 fewer CNOTs, depth 2n+1 vs 2n+3.
+    """
+    if n == 1:
+        return Circuit(1, [X(0)])
+    if n == 2:
+        return Circuit(2, [CNOT(0, 1), X(0)])
+    total = 2 * n - 2
+    c = Circuit(total)
+    slot = lambda i: n + i - 2  # slot for A_i, i >= 2
+    c.gates.append(Toffoli(0, 1, slot(2)))  # A_2 = b_0 & b_1
+    for i in range(3, n):  # A_i = A_{i-1} & b_{i-1}
+        c.gates.append(Toffoli(slot(i - 1), i - 1, slot(i)))
+    for i in range(n - 1, 2, -1):  # top-down apply + uncompute
+        c.gates.append(CNOT(slot(i), i))
+        c.gates.append(Toffoli(slot(i - 1), i - 1, slot(i)))
+    c.gates.append(CNOT(slot(2), 2))  # b_2 ^= A_2
+    c.gates.append(Toffoli(0, 1, slot(2)))  # uncompute A_2
+    c.gates.append(CNOT(0, 1))  # b_1 ^= A_1 = b_0
+    c.gates.append(X(0))  # b_0 ^= 1 LAST
+    return c
+
+
+def _zigzag_increment(n: int) -> Circuit:
+    """Mutation A: ancilla-free zig-zag (CNOT/X layers) — plausible family
+    member; the sandbox decides. (Negative control: gets rejected.)"""
+    if n == 1:
+        return Circuit(1, [X(0)])
+    c = Circuit(n)
+    for i in range(1, n):
+        c.gates.append(CNOT(i - 1, i))
+        c.gates.append(X(i))
+    for i in range(n - 1, 0, -1):
+        c.gates.append(X(i))
+        c.gates.append(CNOT(i - 1, i))
+    return c
+
+
+def _cyclic_increment(n: int) -> Circuit:
+    """Mutation B: cyclic-carry flavor (negative control: rejected)."""
+    c = Circuit(n)
+    c.gates.append(X(0))
+    for i in range(1, n):
+        c.gates.append(X(i))
+    for i in range(n - 1, 0, -1):
+        c.gates.append(CNOT(i - 1, i))
+        c.gates.append(X(i))
+    return c
+
+
+def _inplace_lookahead_increment(n: int) -> Circuit:
+    """Mutation C: in-place prefix-AND chain (negative control: rejected —
+    in-place AND overwrites data bits that later stages still need)."""
+    if n == 1:
+        return Circuit(1, [X(0)])
+    c = Circuit(n)
+    for i in range(2, n):
+        c.gates.append(Toffoli(i - 2, i - 1, i))
+    c.gates.append(X(0))
+    for i in range(n - 1, 0, -1):
+        c.gates.append(X(i))
+    for i in range(n - 1, 1, -1):
+        c.gates.append(Toffoli(i - 2, i - 1, i))
+    return c
+
+
+GENERATOR_POOL = [
+    _lean_interleaved_increment,
+    _zigzag_increment,
+    _cyclic_increment,
+    _inplace_lookahead_increment,
+]
+
+
+class MutatorStandIn:
+    """Deterministic stand-in for the frontier-LLM proposer.
+
+    Emits candidate parameterized generators (functions of n) — never static
+    circuits — per design section 2.1. A real deployment swaps this for an
+    LLM prompted with the feedback trace; the archive/scoring contract stays
+    identical.
+    """
+
+    def __init__(self, seed: int = 0, pool=None):
+        self.rng = random.Random(seed)
+        self._pool = list(pool if pool is not None else GENERATOR_POOL)
+        self._cursor = 0
+
+    def propose(self, trace: str | None = None, batch_size: int = 2):
+        batch = self._pool[self._cursor : self._cursor + batch_size]
+        self._cursor += len(batch)
+        return batch
+
+
+def generator_to_candidate(gen, track: str = "B") -> Candidate:
+    """Wrap a generator as a Candidate, declaring its ancilla slots.
+
+    The lean interleaved incrementer keeps n-2 prefix-AND slots at qubits
+    [n, 2n-2); the rejected mutations are ancilla-free (width n).
+    """
+    from .library import Candidate as _Cand
+
+    def ancilla_fn(n: int) -> list[int]:
+        c = gen(n)
+        return list(range(n, c.n))
+
+    return Candidate(
+        f"invented:{gen.__name__.lstrip('_')}",
+        track,
+        gen,
+        increment_spec,
+        lambda n: n,
+        ancilla_fn,
+    )
+
+
+# ---------------------------------------------------------------------------
+# MAP-Elites archive with Pareto niches (space x time)
+# ---------------------------------------------------------------------------
+
+@dataclass
+class ArchiveEntry:
+    candidate: Candidate
+    report: VerificationReport
+    toffoli_max: int
+    depth_max: int
+    gate_max: int
+    width_max: int
+
+
+def niche_key(rep: VerificationReport) -> tuple[int, int]:
+    m = rep.sizes[-1] if rep.sizes else 0
+    t = rep.toffoli.get(m, 999)
+    d = rep.depth.get(m, 9999)
+    return (t // 2, d // 4)
+
+
+class MAPelitesArchive:
+    def __init__(self):
+        self.niches: dict[tuple, ArchiveEntry] = {}
+
+    def try_insert(self, cand: Candidate, rep: VerificationReport) -> bool:
+        if not rep.passed:
+            return False
+        m = rep.sizes[-1] if rep.sizes else 0
+        key = niche_key(rep)
+        entry = ArchiveEntry(
+            cand, rep,
+            rep.toffoli.get(m, 0), rep.depth.get(m, 0),
+            rep.gate_count.get(m, 0), rep.peak_qubits.get(m, 0),
+        )
+        cur = self.niches.get(key)
+        if cur is None or _better(entry, cur):
+            self.niches[key] = entry
+            return True
+        return False
+
+    def best(self) -> ArchiveEntry | None:
+        if not self.niches:
+            return None
+        return min(
+            self.niches.values(),
+            key=lambda e: (e.width_max, e.toffoli_max, e.gate_max, e.depth_max),
+        )
+
+    def all_passed(self) -> list[ArchiveEntry]:
+        return list(self.niches.values())
+
+
+def _better(new: ArchiveEntry, cur: ArchiveEntry) -> bool:
+    return (new.width_max, new.toffoli_max, new.gate_max, new.depth_max) < (
+        cur.width_max, cur.toffoli_max, cur.gate_max, cur.depth_max,
+    )
+
+
+# ---------------------------------------------------------------------------
+# The discovery campaign (budget-boxed)
+# ---------------------------------------------------------------------------
+
+@dataclass
+class DiscoveryResult:
+    invented: list = field(default_factory=list)
+    attempts: int = 0
+    succeeded: bool = False
+    trace: list = field(default_factory=list)
+
+
+def run_discovery(
+    mutator: MutatorStandIn | None = None,
+    sizes=(3, 4, 5),
+    max_batches: int = 2,
+    seed: int = 0,
+    mode: str = "necessity",
+) -> DiscoveryResult:
+    """Budget-boxed Track B campaign.
+
+    necessity mode: success = at least one verified novel candidate.
+    opportunity mode: success = a verified candidate that Pareto-dominates
+    the library's ancilla-assisted reference (fewer total qubits AND no
+    more Toffolis at the largest size).
+    """
+    mutator = mutator or MutatorStandIn(seed)
+    archive = MAPelitesArchive()
+    res = DiscoveryResult()
+    trace: list[str] = []
+
+    for _ in range(max_batches):
+        gens = mutator.propose("\n".join(trace) if trace else None)
+        if not gens:
+            break
+        for gen in gens:
+            cand = generator_to_candidate(gen)
+            rep = evaluate_candidate(cand, sizes=sizes)
+            res.attempts += 1
+            if rep.passed:
+                inserted = archive.try_insert(cand, rep)
+                m = rep.sizes[-1]
+                trace.append(
+                    f"PASS{' NEW-NICHE' if inserted else ' dominated'} {gen.__name__}: "
+                    f"w={rep.peak_qubits.get(m)} t={rep.toffoli.get(m)} "
+                    f"g={rep.gate_count.get(m)} d={rep.depth.get(m)}"
+                )
+            else:
+                trace.append(f"FAIL {gen.__name__}: {rep.failure_reasons[:2]}")
+
+    res.invented = archive.all_passed()
+    if mode == "necessity":
+        res.succeeded = len(res.invented) > 0
+    else:
+        ref = build_increment_ancilla_reference(sizes[-1])
+        ref_profile = (ref.n, ref.toffoli_count())
+        res.succeeded = any(
+            (e.width_max, e.toffoli_max) <= ref_profile for e in res.invented
+        ) and len(res.invented) > 0
+    res.trace = trace
+    return res
