@@ -1,7 +1,7 @@
 # Quantum Algorithm Creator — Agent Design Document
 
-**Version:** 1.2 (2026-11-19)
-**Status:** Design specification
+**Version:** 1.3 (2026-11-24)
+**Status:** Target architecture with a reference implementation in §7
 **Goal:** An AI agent that takes an unstructured real-world problem and returns a ranked portfolio of machine-verified solutions — a production-grade *existing* quantum algorithm where one fits, and, when necessary or beneficial and feasible, a *novel* algorithm invented by the agent itself. **One problem, many solutions.**
 
 > ## Core Philosophy: Known Algorithms First — Novel Algorithms When the Agent Can, and Often Both
@@ -13,14 +13,12 @@
 >    - **Necessity mode:** no known algorithm fits the budget, or the required coherent subroutine simply does not exist → Track B attempts to invent one, *if it can*.
 >    - **Opportunity mode:** a known solution exists, but budget allows attempting a novel candidate with better resource trade-offs (lower Toffoli count, fewer qubits, shallower depth) → run Track B in parallel and rank the invented candidate alongside the known solution.
 > 3. **Portfolio output.** Whenever resources allow, the deliverable is a ranked set of K machine-verified solutions (known and/or invented), letting the user choose by hardware target, cost model, or risk appetite. Multiple distinct solutions to the same problem are a feature, not a redundancy.
-> 4. **Honest invention ("if it can").** Track B campaigns are budget- and time-boxed. Failing to invent is an acceptable outcome — the agent then delivers the best known solution plus a precise analysis of the bottleneck it could not crack. What is *never* acceptable is claiming novelty without machine verification.
-> 5. **Machine-verified novelty only — the triple gate.** An invented algorithm is delivered **only** when it holds an `InnovationCertificate` proving all three, none optional:
->    - **Correct** — exact semantics (statevector, exhaustive over all inputs, amplitude +1) on an *extended* size sweep beyond the campaign sizes, cross-checked on the independent kickmix evaluator (two code paths, same verdict), with clean ancilla and polynomial scaling;
->    - **Valuable** — strictly Pareto-dominates every same-spec known baseline at *every* verified size (≤ resources on all axes, strictly better on at least one), or is the first solution to a problem no baseline solves;
->    - **Novel** — not a duplicate of any same-spec known baseline, judged by gate-sequence fingerprint *and* exact unitary equality. A re-derivation of the library is deliverable as the known solution, never as an invention.
->
->    A candidate failing any one of the three is excluded from the "invented" portfolio and the failure reason is reported. What is *never* acceptable is claiming novelty without this machine verification.
-> 6. **Inventions compound.** Verified discoveries are crystallized as reusable `Bloq`s in Track A's library (Phase 5), permanently expanding the capability frontier so future problems start from a richer baseline.
+> 4. **Bounded discovery.** Track B campaigns operate under a declared budget. The portfolio can fall back to a verified known circuit for the requested contract.
+> 5. **Evidence for promotion.** Promote an optimization after checking three properties.
+>    - **Correctness.** Evaluate every declared size, including sizes held out from mutation, against the same functional specification. Verify phases and clean work qubits.
+>    - **Resource improvement.** Require weak Pareto dominance on every measured axis and size, with a strict win somewhere against each selected, semantically verified baseline.
+>    - **Structural distinctness.** Compare normalized gate schedules across the verified sizes. Literature novelty requires independent review of prior art.
+> 6. **Reuse.** Integrate verified circuit builders as reusable library entries. Qualtran `Bloq` export belongs to Phase 5.
 
 ---
 
@@ -163,7 +161,7 @@ Ranking is per hardware target (NISQ vs. FTQC objective modes, §5), letting the
 Recent breakthroughs in automated quantum discovery demonstrate that LLMs paired with programmatic evaluators can outperform human-designed state-of-the-art circuits and invent entirely new reversible algorithmic structures (e.g., prime-field reversible `divsteps` for modular inversion, low-Toffoli Reed–Solomon syndrome decoders). Track B requires four specialized design mechanisms:
 
 ### 2.1 Size-Parameterized DSL Generation (Small-$n$ → Arbitrary-$N$ Generalization)
-Never let the discovery agent synthesize a static circuit for a single fixed qubit count. Force the LLM to output a **Python meta-program or motif-based DSL** (e.g., **Hierarqcal** motifs or parameterized **Qualtran** `Bloq` builders) that takes problem size $n$ as an input argument. Evaluating candidate generators on tiny instances ($n \in \{2,3,4,5\}$) is computationally cheap on classical CPUs/GPUs yet sufficient for discovered algorithms (QFT, Grover variants, novel state-preparation trees) to generalize inductively to arbitrary $n$.
+Never let the discovery agent synthesize a static circuit for a single fixed qubit count. Force the LLM to output a **Python meta-program or motif-based DSL** (e.g., **Hierarqcal** motifs or parameterized **Qualtran** `Bloq` builders) that takes problem size $n$ as an input argument. Small instances ($n \in \{2,3,4,5\}$) provide cheap search feedback. Larger held-out sizes test generalization, and a construction argument establishes any claim for arbitrary $n$.
 
 ### 2.2 Coherent Redesign & Uncomputation-Aware Search
 Converting classical logic into a quantum subroutine often fails because retaining branch history for reversibility consumes massive ancilla memory. Prompt and reward the discovery agent to modify the *underlying algorithmic representation*:
@@ -240,7 +238,7 @@ Whenever Track B discovers and formally verifies a Pareto-superior quantum subro
 
 ## 5. Critical Engineering Guardrails
 
-- **Enforce symbolic scaling fits.** A candidate that passes on $n=3,4$ by brute-force unrolling may hide exponential $\mathcal{O}(2^n)$ gate blowup. The evaluator fits polynomial vs. exponential curves across $n \in \{3,\dots,7\}$ and penalizes complexity growth directly in the evolutionary fitness score.
+- **Enforce symbolic scaling fits.** A candidate that passes on $n=3,4$ by brute-force unrolling may hide exponential $\mathcal{O}(2^n)$ gate blowup. Fit polynomial and exponential curves across the observed sizes as a growth diagnostic. Use a construction argument for an asymptotic complexity claim.
 - **Isolate NISQ vs. Fault-Tolerant objectives.** The hardware target dictates what "good" means. Configure the fitness function dynamically:
   - **NISQ / Early-FTQC mode** — heavily penalize two-qubit gate depth, routing SWAPs, and barren-plateau gradient variance (favor non-variational generators like DQAOA-GPT or shallow adaptive circuits);
   - **Full-FTQC mode** — minimize magic-state factories (**Toffoli / T-count**) and **logical qubit spacetime volume**.
@@ -259,17 +257,16 @@ Whenever Track B discovers and formally verifies a Pareto-superior quantum subro
 
 ## 7. Implementation Status (Reference Implementation)
 
-A runnable micro-scale reference implementation of this design lives in `qac/` (pure Python + numpy; no external quantum SDKs required):
+The reference implementation accepts explicitly registered reversible arithmetic contracts and generates logical circuits. Its runtime uses the Python standard library.
 
-| Design layer | Module | Status |
+| Layer | Module | Implemented behavior |
 | --- | --- | --- |
-| Layer 1 — Formalization & Triage | `qac/problem.py` | Implemented: typed IRs, QRAM/quadratic rejection rule, necessity/opportunity router |
-| Layer 2A — Retrieval & Synthesis | `qac/library.py` | Implemented: verified parameterized known-algorithm library (micro GraphRAG stand-in) |
-| Layer 2B — Evolutionary Discovery | `qac/track_b.py` | Implemented: MAP-Elites archive, budget-boxed campaigns, deterministic mutator stand-in (LLM-swappable) |
-| Layer 3 — Verification Sandbox | `qac/sandbox.py`, `qac/kickmix.py` | Implemented: kickmix fast path, exhaustive semantic verification (function + clean ancilla + no stray phase), scaling-fit guardrail, typed reports |
-| Layer 4 — Ranked Portfolio | `qac/portfolio.py` | Implemented: provenance-tagged ranked portfolios, mixed known/invented delivery |
-| Innovation certificate (triple gate) | `qac/novelty.py` | Implemented: `InnovationCertificate` — correct (extended sizes + kickmix cross-check) x valuable (strict Pareto vs every same-spec baseline) x novel (fingerprint + unitary duplicate detection); enforced in Track B and the portfolio |
+| Triage | `qac/problem.py`, `qac/portfolio.py` | Typed IR, explicit contract routing, and an O(N) loading heuristic for one-off quadratic-query workloads |
+| Track A | `qac/library.py`, `qac/sota_baselines.py` | Twelve registered families and same-contract comparison circuits |
+| Track B | `qac/track_b.py`, `qac/arithmetic.py` | Seeded mutation of circuit-building choices, selection from a width/depth MAP-Elites archive, and disjoint holdout validation |
+| Verification | `qac/sandbox.py`, `qac/kickmix.py` | Exhaustive bit-plane evaluation, independent scalar Kickmix, dense statevectors for small instances, and exact logical resource counts |
+| Portfolio | `qac/portfolio.py`, `qac/novelty.py` | Known and optimized circuit builders, baseline profiles, structural deduplication, and resource certificates |
 
-**Validated invention (Phase-1/4 milestone):** the discovery engine invented the *lean interleaved incrementer* — by eliminating the textbook incrementer's redundant A₁ ancilla slot and interleaving apply/uncompute top-down (pebble-game scheduling, X(0) strictly last), it saves 1 logical qubit and 2 gates at every size n=1..7 with identical Toffoli count (exhaustively machine-verified; 3 sibling mutation variants were deterministically rejected by the sandbox in the same campaign). It holds a full `InnovationCertificate`: correct (exhaustive statevector + independent kickmix cross-check, n=2..6), valuable (strict Pareto wins on width/gates/depth vs the textbook baseline at every size), novel (distinct fingerprint and unitary). Negative controls verify the gate bites: a re-derivation of the known circuit is rejected as non-novel, a padded Pareto-dominated variant is rejected as valueless, and a wrong-function candidate is rejected as incorrect. Test suite: `python3 -m pytest tests/ -q` → 65 passed. Demo: `python3 -m qac.cli`.
+The current search grammar covers majority, weighted threshold, and fixed-constant comparison. A separate replay audits historical incrementer proposals. The runnable CLI and experimental results appear in the [README](README.md). Optional Qiskit checks independently simulate complex superpositions and compare circuits after compilation to a common basis.
 
-Scaling to the full 2026 stack (Qualtran/Qiskit/Stim backends, Ray-distributed islands, LLM mutators, FTQC resource estimators) follows the five-phase plan in section 4; the `qac/` module boundaries and the sandbox evaluation contract are designed to stay fixed while backends are swapped in.
+The remaining design work includes unstructured problem formalization, LLM mutation, distributed search, SDK export, and fault-tolerant resource estimation.

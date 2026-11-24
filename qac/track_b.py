@@ -1,30 +1,16 @@
-"""Layer 2B: evaluator-guided evolutionary discovery (Track B).
-
-Implements the design's discovery loop at micro scale:
-  - a deterministic "LLM-mutator stand-in" that proposes parameterized
-    circuit-generator programs (Python functions of n building Circuits);
-  - a MAP-Elites archive keyed by (Toffoli-band, depth-band) niches;
-  - the Layer-3 semantic sandbox as the only fitness oracle (Maker-Checker);
-  - necessity mode (no known algorithm) and opportunity mode (beat a known
-    baseline) per AGENT_DESIGN.md section 2.
-
-The flagship invention here is the *lean interleaved incrementer*
-(_lean_interleaved_increment): by dropping the library's redundant A_1
-ancilla slot and interleaving apply/uncompute top-down (pebble-game qubit
-scheduling), it saves one qubit and two gates at identical Toffoli count —
-a Pareto dominance over the textbook reference, exactly the trade the
-design doc's islands optimize.
-"""
+"""Track B: bounded, evaluator-guided search over circuit generator programs."""
 
 from __future__ import annotations
 
 import random
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 
-from .kickmix import CNOT, Circuit, SWAP, Toffoli, X, Z
-from .sandbox import evaluate_candidate, VerificationReport
-from .library import Candidate, increment_spec, build_increment_ancilla_reference
-from .novelty import InnovationCertificate, certify_innovation
+from .arithmetic import SumProgram, build_sum_threshold, compact_circuit, threshold_flag
+from .kickmix import CNOT, Circuit, Toffoli, X
+from .library import Candidate, KnownAlgorithmLibrary, lessthan_k, majority_K, weighted_theta
+from .novelty import InnovationCertificate, RESOURCE_AXES, certify_innovation
+from .sandbox import VerificationReport, evaluate_candidate, verification_sizes
+from .sota_baselines import sota_baselines, specialized_baselines
 
 
 # ---------------------------------------------------------------------------
@@ -32,7 +18,7 @@ from .novelty import InnovationCertificate, certify_innovation
 # ---------------------------------------------------------------------------
 
 def _lean_interleaved_increment(n: int) -> Circuit:
-    """INVENTED: "lean interleaved" incrementer — Pareto-dominates the library.
+    """Historical lean interleaved incrementer.
 
     Key idea: the library's textbook incrementer dedicates an ancilla slot to
     A_1 = b_0, but A_1 is just b_0 itself — the slot is pure waste. Drop it:
@@ -66,28 +52,7 @@ def _lean_interleaved_increment(n: int) -> Circuit:
 
 
 def _topwrite_increment(n: int) -> Circuit:
-    """INVENTED: "top-write" incrementer — strictly Pareto-dominates the lean
-    interleaved incrementer on ALL FOUR axes (width, Toffoli, gates, depth).
-
-    Key idea: the previous best design materializes the top carry
-    A_{n-1} = AND(b_0..b_{n-2}) in a slot only to apply it with a CNOT and
-    uncompute it immediately — but A_{n-1} is never an input to any higher
-    carry, and the top data bit b_{n-1} is never read again after its flip.
-    So the top carry is applied IN PLACE as a single gate:
-        Toffoli(s_{n-2}, b_{n-2}, b_{n-1})   # b_{n-1} ^= A_{n-1}
-    eliminating the top slot AND its apply-CNOT AND its uncompute-Toffoli.
-    The rest is the same interleaved prefix-AND schedule, one level shorter.
-
-    Machine-verified n=1..8 (exhaustive semantics + ancilla-clean):
-      width   2n-3   vs lean 2n-2  (one fewer qubit),
-      toffoli 2n-5   vs lean 2n-4  (one fewer Toffoli),
-      gates/depth 3n-6 vs lean 3n-4 (two fewer each).
-    Honest scope: the formulas hold for n>=3; at n=1..2 the base cases coincide
-    with the lean construction by design, so the strict-dominance claim vs lean
-    is scoped to n>=3. Against the gate's actual baselines (known:increment-
-    ancilla, sota:cdkm-increment) it is <= on all axes with a strict win on
-    every axis at every checked size n=2..6.
-    """
+    """Historical top-write incrementer with a fused terminal carry."""
     if n == 1:
         return Circuit(1, [X(0)])
     if n == 2:
@@ -165,16 +130,9 @@ GENERATOR_POOL = [
 
 
 class MutatorStandIn:
-    """Deterministic stand-in for the frontier-LLM proposer.
-
-    Emits candidate parameterized generators (functions of n) — never static
-    circuits — per design section 2.1. A real deployment swaps this for an
-    LLM prompted with the feedback trace; the archive/scoring contract stays
-    identical.
-    """
+    """Replay the historical increment proposals for auditing or custom tests."""
 
     def __init__(self, seed: int = 0, pool=None):
-        self.rng = random.Random(seed)
         self._pool = list(pool if pool is not None else GENERATOR_POOL)
         self._cursor = 0
 
@@ -185,165 +143,245 @@ class MutatorStandIn:
 
 
 def generator_to_candidate(gen, track: str = "B") -> Candidate:
-    """Wrap a generator as a Candidate, declaring its ancilla slots.
+    """Bind a historical increment generator to the arithmetic specification."""
+    reference = KnownAlgorithmLibrary().synthesize("increment", 1)
+    return reference.implementation(f"invented:{gen.__name__.lstrip('_')}", track, gen)
 
-    The lean interleaved incrementer keeps n-2 prefix-AND slots at qubits
-    [n, 2n-2); the rejected mutations are ancilla-free (width n).
-    """
-    from .library import Candidate as _Cand
-
-    def ancilla_fn(n: int) -> list[int]:
-        c = gen(n)
-        return list(range(n, c.n))
-
-    return Candidate(
-        f"invented:{gen.__name__.lstrip('_')}",
-        track,
-        gen,
-        increment_spec,
-        lambda n: n,
-        ancilla_fn,
-    )
-
-
-# ---------------------------------------------------------------------------
-# MAP-Elites archive with Pareto niches (space x time)
-# ---------------------------------------------------------------------------
 
 @dataclass
 class ArchiveEntry:
     candidate: Candidate
     report: VerificationReport
     certificate: InnovationCertificate | None = None
-    toffoli_max: int = 0
-    depth_max: int = 0
-    gate_max: int = 0
-    width_max: int = 0
+
+    @property
+    def width_max(self) -> int:
+        return self.report.peak_qubits[self.report.sizes[-1]]
 
 
-def niche_key(rep: VerificationReport) -> tuple[int, int]:
-    m = rep.sizes[-1] if rep.sizes else 0
-    t = rep.toffoli.get(m, 999)
-    d = rep.depth.get(m, 9999)
-    return (t // 2, d // 4)
+def _profile(rep: VerificationReport) -> tuple[int, ...]:
+    metrics = (rep.peak_qubits, rep.toffoli, rep.gate_count, rep.depth)
+    return tuple(metric[n] for n in rep.sizes for metric in metrics)
+
+
+def _quality(entry: ArchiveEntry) -> tuple:
+    profile = _profile(entry.report)
+    return (*(sum(profile[i::4]) for i in (1, 2, 3, 0)), entry.candidate.id)
+
+
+def _dominates(a: tuple[int, ...], b: tuple[int, ...]) -> bool:
+    return a != b and all(x <= y for x, y in zip(a, b, strict=True))
 
 
 class MAPelitesArchive:
+    """Store one elite per logical width and four-layer depth band."""
+
     def __init__(self):
-        self.niches: dict[tuple, ArchiveEntry] = {}
+        self.niches: dict[tuple[int, int], ArchiveEntry] = {}
 
     def try_insert(self, cand: Candidate, rep: VerificationReport, certificate: InnovationCertificate | None = None) -> bool:
-        if not rep.passed:
+        if not rep.passed or not rep.sizes:
             return False
-        m = rep.sizes[-1] if rep.sizes else 0
-        key = niche_key(rep)
-        entry = ArchiveEntry(
-            cand, rep, certificate,
-            rep.toffoli.get(m, 0), rep.depth.get(m, 0),
-            rep.gate_count.get(m, 0), rep.peak_qubits.get(m, 0),
-        )
-        cur = self.niches.get(key)
-        if cur is None or _better(entry, cur):
-            self.niches[key] = entry
-            return True
-        return False
+        n = rep.sizes[-1]
+        key = rep.peak_qubits[n], rep.depth[n] // 4
+        entry = ArchiveEntry(cand, rep, certificate)
+        current = self.niches.get(key)
+        if current is not None and _quality(entry) >= _quality(current):
+            return False
+        self.niches[key] = entry
+        return True
 
     def best(self) -> ArchiveEntry | None:
-        if not self.niches:
-            return None
-        return min(
-            self.niches.values(),
-            key=lambda e: (e.width_max, e.toffoli_max, e.gate_max, e.depth_max),
-        )
+        return min(self.niches.values(), key=_quality, default=None)
 
     def all_passed(self) -> list[ArchiveEntry]:
-        return list(self.niches.values())
+        return sorted(self.niches.values(), key=_quality)
 
 
-def _better(new: ArchiveEntry, cur: ArchiveEntry) -> bool:
-    return (new.width_max, new.toffoli_max, new.gate_max, new.depth_max) < (
-        cur.width_max, cur.toffoli_max, cur.gate_max, cur.depth_max,
-    )
+@dataclass(frozen=True)
+class ComparatorProgram:
+    fuse: bool = False
+    polarity: bool = False
 
 
-# ---------------------------------------------------------------------------
-# The discovery campaign (budget-boxed)
-# ---------------------------------------------------------------------------
+EVOLUTION_FAMILIES = ("majority", "weighted_threshold", "less_than")
+
+
+class _CircuitEvolution:
+    def __init__(self, family: str, reference: Candidate, seed: int):
+        self.family = family
+        self.reference = reference
+        self.rng = random.Random(seed)
+        self.programs: dict[str, SumProgram | ComparatorProgram] = {}
+        self.lineage: dict[str, dict] = {}
+        self.seen: set[SumProgram | ComparatorProgram] = set()
+        if family == "less_than":
+            self.initial = ComparatorProgram()
+            self.choices = {"fuse": (False, True), "polarity": (False, True)}
+        else:
+            self.initial = SumProgram(fuse=True)
+            self.choices = {
+                "bounded": (False, True), "fuse": (False, True), "pair": (False, True),
+                "marker": ("ripple", "polarity", "overflow"),
+            }
+            if family == "weighted_threshold":
+                self.choices["order"] = ("input", "heavy_first", "low_first", "high_first")
+
+    def _compile(self, n: int, program: SumProgram | ComparatorProgram) -> Circuit:
+        if isinstance(program, ComparatorProgram):
+            gates = threshold_flag(tuple(range(n - 1)), lessthan_k(n), n - 1, n,
+                                   complement=True, fuse=program.fuse, polarity=program.polarity)
+            return compact_circuit(n, gates)
+        if self.family == "majority":
+            return build_sum_threshold((1,) * n, majority_K(n), program)
+        return build_sum_threshold(tuple(range(1, n + 1)), weighted_theta(n), program)
+
+    def _candidate(self, program, parent: str | None, mutation: str) -> Candidate:
+        suffix = "-".join(str(int(value)) if isinstance(value, bool) else value
+                          for value in asdict(program).values())
+        candidate_id = f"optimized:{self.family}:{suffix}"
+        self.seen.add(program)
+        self.programs[candidate_id] = program
+        self.lineage[candidate_id] = {"parent": parent, "mutation": mutation, "program": asdict(program)}
+        return self.reference.implementation(candidate_id, "B", lambda n: self._compile(n, program))
+
+    def propose(self, archive: MAPelitesArchive, *, evolve: bool, batch_size: int) -> list[Candidate]:
+        if not self.seen:
+            return [self._candidate(self.initial, None, "initial program")]
+        if not evolve:
+            return []
+        elites = archive.all_passed()
+        if not elites:
+            return []
+        parents = [elites[0], *self.rng.sample(elites[1:], len(elites) - 1)]
+        proposals = []
+        for entry in parents:
+            parent = entry.candidate.id
+            current = self.programs[parent]
+            mutations = [(field, value) for field, values in self.choices.items() for value in values
+                         if value != getattr(current, field)]
+            self.rng.shuffle(mutations)
+            for field, value in mutations:
+                child = replace(current, **{field: value})
+                if child in self.seen:
+                    continue
+                proposals.append(self._candidate(child, parent, f"{field}={value}"))
+                if len(proposals) == batch_size:
+                    return proposals
+                break
+        return proposals
+
 
 @dataclass
 class DiscoveryResult:
-    invented: list = field(default_factory=list)
-    certified: list = field(default_factory=list)  # triple-gated (correct x valuable x novel)
-    certificates: dict = field(default_factory=dict)  # candidate id -> InnovationCertificate
+    certified: list[ArchiveEntry] = field(default_factory=list)
+    certificates: dict[str, InnovationCertificate] = field(default_factory=dict)
     attempts: int = 0
     succeeded: bool = False
-    trace: list = field(default_factory=list)
+    trace: list[str] = field(default_factory=list)
+    lineage: dict[str, dict] = field(default_factory=dict)
+    search_sizes: tuple[int, ...] = ()
+    holdout_sizes: tuple[int, ...] = ()
+
+    @property
+    def invented(self) -> list[ArchiveEntry]:
+        """Compatibility alias for locally certified circuit optimizations."""
+        return self.certified
+
+
+def _frontier(entries: list[ArchiveEntry]) -> list[ArchiveEntry]:
+    profiles: dict[tuple[int, ...], ArchiveEntry] = {}
+    for entry in sorted(entries, key=_quality):
+        profile = tuple(entry.certificate.resources[n][axis]
+                        for n in entry.certificate.extended_sizes for axis in RESOURCE_AXES)
+        profiles.setdefault(profile, entry)
+    return [entry for profile, entry in profiles.items()
+            if not any(_dominates(other, profile) for other in profiles)]
 
 
 def run_discovery(
     mutator: MutatorStandIn | None = None,
     sizes=(3, 4, 5),
-    max_batches: int = 2,
+    max_batches: int = 16,
     seed: int = 0,
     mode: str = "necessity",
+    *,
+    problem_key: str = "increment",
+    holdout_sizes=None,
+    evolve: bool = True,
 ) -> DiscoveryResult:
-    """Budget-boxed Track B campaign.
+    """Evolve and score on search sizes, then certify on untouched sizes."""
+    if type(max_batches) is not int or max_batches < 0:
+        raise ValueError("max_batches must be a nonnegative integer")
+    if mode not in ("necessity", "opportunity"):
+        raise ValueError(f"unknown discovery mode: {mode!r}")
+    sizes = verification_sizes(sizes)
+    if holdout_sizes is None:
+        holdout_sizes = tuple(n for n in (6, 7, 8, 9, 10, 11, 12) if n not in sizes)[:3]
+    holdout = verification_sizes(holdout_sizes)
+    if set(sizes).intersection(holdout):
+        raise ValueError("search and holdout sizes must be disjoint")
+    result = DiscoveryResult(search_sizes=sizes, holdout_sizes=holdout)
+    library = KnownAlgorithmLibrary()
+    if not library.has(problem_key):
+        result.trace.append(f"No reversible contract registered for {problem_key!r}")
+        return result
 
-    necessity mode: success = at least one verified novel candidate.
-    opportunity mode: success = a verified candidate that Pareto-dominates
-    the library's ancilla-assisted reference (fewer total qubits AND no
-    more Toffolis at the largest size).
-    """
-    mutator = mutator or MutatorStandIn(seed)
+    reference = library.synthesize(problem_key, sizes[-1])
+    specialized = specialized_baselines(library).get(problem_key)
+    baselines = [reference]
+    if problem_key == "increment":
+        baselines.extend(b for b in sota_baselines() if b.id == "sota:cdkm-increment")
+    if specialized is not None:
+        baselines.append(specialized)
     archive = MAPelitesArchive()
-    res = DiscoveryResult()
-    trace: list[str] = []
+    evolution = None
+    legacy = mutator
+    if legacy is None:
+        if problem_key in EVOLUTION_FAMILIES:
+            evolution = _CircuitEvolution(problem_key, reference, seed)
+        elif problem_key == "increment":
+            legacy = MutatorStandIn(seed)
+        else:
+            result.trace.append(f"No Track B synthesis grammar for {problem_key!r}")
+            return result
 
+    verified = {}
     for _ in range(max_batches):
-        gens = mutator.propose("\n".join(trace) if trace else None)
-        if not gens:
+        if evolution is not None:
+            candidates = evolution.propose(archive, evolve=evolve, batch_size=2)
+        else:
+            generators = legacy.propose("\n".join(result.trace), batch_size=2)[:2]
+            candidates = [reference.implementation(f"invented:{gen.__name__.lstrip('_')}", "B", gen)
+                          for gen in generators]
+        if not candidates:
             break
-        for gen in gens:
-            cand = generator_to_candidate(gen)
-            rep = evaluate_candidate(cand, sizes=sizes)
-            res.attempts += 1
-            if rep.passed:
-                cert = certify_innovation(cand, report=rep)
-                res.certificates[cand.id] = cert
-                if cert.certified:
-                    inserted = archive.try_insert(cand, rep, cert)
-                    m = rep.sizes[-1]
-                    trace.append(
-                        f"PASS{' NEW-NICHE' if inserted else ' dominated'} {gen.__name__}: "
-                        f"w={rep.peak_qubits.get(m)} t={rep.toffoli.get(m)} "
-                        f"g={rep.gate_count.get(m)} d={rep.depth.get(m)} "
-                        f"| CERTIFIED correct+valuable+novel"
-                    )
-                else:
-                    failed_gates = [
-                        g for g, ok in (
-                            ("correct", cert.correct), ("valuable", cert.valuable), ("novel", cert.novel),
-                        ) if not ok
-                    ]
-                    trace.append(
-                        f"PASS-SANDBOX BUT UNCERTIFIED {gen.__name__}: "
-                        f"fails [{' & '.join(failed_gates)}] — {cert.reasons[:1]}"
-                    )
+        for candidate in candidates:
+            if candidate.id in verified:
+                continue
+            report = evaluate_candidate(candidate, sizes=sizes)
+            result.attempts += 1
+            verified[candidate.id] = ArchiveEntry(candidate, report)
+            if report.passed:
+                elite = archive.try_insert(candidate, report)
+                result.trace.append(f"PASS {candidate.id} {'(elite)' if elite else ''}")
             else:
-                trace.append(f"FAIL {gen.__name__}: {rep.failure_reasons[:2]}")
+                result.trace.append(f"FAIL {candidate.id}: {report.failure_reasons[0]}")
 
-    res.invented = archive.all_passed()
-    res.certified = [e for e in res.invented if e.certificate is not None and e.certificate.certified]
-    if mode == "necessity":
-        res.succeeded = len(res.certified) > 0
-    else:
-        ref = build_increment_ancilla_reference(sizes[-1])
-        ref_profile = (ref.n, ref.toffoli_count())
-        res.succeeded = any(
-            e.certificate is not None
-            and e.certificate.certified
-            and (e.width_max, e.toffoli_max) <= ref_profile
-            for e in res.invented
-        ) and len(res.certified) > 0
-    res.trace = trace
-    return res
+    if evolution is not None:
+        result.lineage = evolution.lineage
+    finalists = [entry for entry in verified.values() if entry.report.passed]
+    checked_sizes = verification_sizes((1, 2, *sizes, *holdout))
+    accepted = []
+    for entry in finalists:
+        cert = certify_innovation(entry.candidate, report=entry.report, baseline_candidates=baselines,
+                                  extended_sizes=checked_sizes)
+        result.certificates[entry.candidate.id] = cert
+        if cert.certified:
+            entry.certificate = cert
+            accepted.append(entry)
+        else:
+            result.trace.append(f"UNCERTIFIED {entry.candidate.id}: {cert.reasons[0]}")
+    result.certified = _frontier(accepted)
+    result.succeeded = bool(result.certified)
+    return result

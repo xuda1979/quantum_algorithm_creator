@@ -45,7 +45,11 @@ class KickmixSimulator:
         import random
 
         rng = rng or random
-        return KickmixState(n=n, x=rng.getrandbits(n), ancilla_bits=frozenset(ancilla_bits))
+        ancillas = frozenset(ancilla_bits)
+        if any(not 0 <= i < n for i in ancillas):
+            raise ValueError("ancilla index out of range")
+        x = rng.getrandbits(n) & ~sum(1 << i for i in ancillas)
+        return KickmixState(n=n, x=x, ancilla_bits=ancillas)
 
     def run(self, circuit, state: KickmixState) -> KickmixState:
         for gate in circuit.gates:
@@ -60,10 +64,14 @@ class KickmixSimulator:
         n_samples: int = 128,
         seed: int = 0,
     ) -> bool:
-        """Check V|x>|a> = |pi(x)>|a> (identity permutation, clean ancilla)."""
+        """Sample V|x>|0> = |truth_table[x]>|0> using physical bit indices."""
         import random
 
         rng = random.Random(seed)
+        circuit.validate()
+        if not allows_fast_path(circuit) or n_samples < 1:
+            raise ValueError("oracle sampling requires a basis-preserving circuit and positive sample count")
+        ancilla_bits = tuple(ancilla_bits)
         n = circuit.n
         for _ in range(n_samples):
             st = self.sample_state(n, ancilla_bits, rng)
@@ -71,7 +79,9 @@ class KickmixSimulator:
             st = self.run(circuit, st)
             if st.phase != 0:
                 return False
-            if st.x != truth_table.get(x_in, x_in):
+            if x_in not in truth_table or st.x != truth_table[x_in]:
+                return False
+            if any(st.bit(i) for i in st.ancilla_bits):
                 return False
         return True
 
@@ -272,6 +282,18 @@ class Circuit:
 
     n: int
     gates: list = field(default_factory=list)
+
+    def validate(self) -> None:
+        if type(self.n) is not int or self.n < 0:
+            raise ValueError(f"invalid circuit width: {self.n!r}")
+        for gate in self.gates:
+            if not isinstance(gate, Gate):
+                raise ValueError(f"invalid gate: {gate!r}")
+            wires = gate.targets()
+            if any(type(wire) is not int or not 0 <= wire < self.n for wire in wires):
+                raise ValueError(f"{gate.name} has an out-of-range operand: {wires}")
+            if len(set(wires)) != len(wires):
+                raise ValueError(f"{gate.name} has repeated operands: {wires}")
 
     def toffoli_count(self) -> int:
         return sum(1 for g in self.gates if isinstance(g, (Toffoli, CCZ)))
