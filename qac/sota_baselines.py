@@ -21,7 +21,7 @@ import hashlib
 
 from .arithmetic import SumProgram, build_sum_threshold, compact_circuit, controlled_increment
 from .kickmix import CNOT, Circuit, Toffoli, X
-from .library import Candidate, KnownAlgorithmLibrary, addconst_k, addconst_spec, increment_spec
+from .library import Candidate, KnownAlgorithmLibrary, addconst_k, addconst_spec, decrement_spec, increment_spec
 from .library import majority_K, weighted_theta
 
 CUCCARO_CITATION = (
@@ -181,6 +181,21 @@ def build_shared_prefix_increment(n: int) -> Circuit:
     return compact_circuit(n, gates + [X(0)])
 
 
+def build_shared_prefix_decrement(n: int) -> Circuit:
+    """Shared-prefix decrementer: the gate-reversal dual of the increment ladder.
+
+    Decrement is the time-reverse of increment (both are their own inverse
+    functions only at the gate level: D = I^{-1}, and circuit reversal IS
+    inverse for a gate set closed under self-inverse gates). Reversing the
+    shared-prefix ladder therefore yields a decrementer at the incrementer's
+    exact cost. This is the honest same-spec reference: any decrementer built
+    by reversing an incrementer must compare against it, not against the
+    textbook wrap reference (which pays a full padded register).
+    """
+    inc = build_shared_prefix_increment(n)
+    return Circuit(inc.n, list(reversed(inc.gates)))
+
+
 def specialized_baselines(library: KnownAlgorithmLibrary) -> dict[str, Candidate]:
     """Same-contract references with the main textbook inefficiencies removed."""
     fixed_width = SumProgram(fuse=True)
@@ -198,4 +213,6 @@ def specialized_baselines(library: KnownAlgorithmLibrary) -> dict[str, Candidate
             "reference:fixed-width-majority", "A", fixed_width_majority),
         "weighted_threshold": library.synthesize("weighted_threshold", 1).implementation(
             "reference:fixed-width-weighted", "A", fixed_width_weighted),
+        "decrement": library.synthesize("decrement", 1).implementation(
+            "reference:shared-prefix-decrement", "A", build_shared_prefix_decrement),
     }

@@ -77,6 +77,91 @@ def _topwrite_increment(n: int) -> Circuit:
     return c
 
 
+def _topwrite_addconst(n: int) -> Circuit:
+    """INVENTED: "top-write" constant adder — x -> (x + n) mod 2^n.
+
+    Second algorithm family (constant addition, not just +1). Three savings the
+    textbook ripple-carry adder (known:addconst-carry) and CDKM (sota:cdkm-
+    addconst) both leave on the table:
+
+      1. Trivial-carry elimination. Carries below the lowest set bit j0 of the
+         constant k are identically 0; at j0 the carry out is just c_{j0+1} =
+         x_{j0} (a single CNOT). The baselines still run majorities there.
+      2. Top-write dead-value fusion. The carry into bit n-1 is chain-terminal
+         and its target bit is a dead value, so it is written IN PLACE:
+             AND-case: Toffoli(n-2, q, n-1)
+             OR-case:  CNOT(n-2,n-1), CNOT(q,n-1), Toffoli(n-2,q,n-1)
+         eliminating the top ancilla AND its apply-CNOT AND its uncompute.
+      3. Dense ancilla packing. Only the carries c_{j0+1}..c_{n-2} are
+         materialized, at qubits q(j) = n + (j - j0 - 1).
+
+    Constant k = addconst_k(n) = n, so for n >= 3 the top constant bit k_{n-1}
+    is 0 (n < 2^{n-1}) and the top bit needs only the carry.
+
+    Machine-verified n=1..8 (exhaustive semantics + ancilla-clean, amplitude +1)
+    in /tmp/addconst_check.py, independently re-checked with Qiskit
+    (/tmp/qiskit_verify.py). Scope: base cases n=1..4 are pinned; the general
+    j0-based schedule runs n >= 5. Dominance vs both same-spec baselines at
+    every checked size n=2..6 (<= on all axes, strict on >= 1).
+    """
+    if n == 1:  # +1 mod 2 is NOT x -> flip the only bit
+        return Circuit(1, [X(0)])
+    if n == 2:  # +2 mod 4 is a plain flip of bit 1
+        return Circuit(2, [X(1)])
+    if n == 3:  # k = 3 = 0b11: j0 = 0, single materialized carry c_1 = x_0
+        return Circuit(
+            4,
+            [
+                CNOT(0, 3),  # c_1 = x_0
+                CNOT(1, 2),  # c_2 = x_1 | c_1 written into dead bit 2
+                CNOT(3, 2),
+                Toffoli(1, 3, 2),
+                CNOT(3, 1),  # s_1 ^= c_1
+                X(1),  # k_1 = 1
+                CNOT(0, 3),  # uncompute c_1
+                X(0),  # s_0 = NOT x_0  (k_0 = 1, c_0 = 0) LAST
+            ],
+        )
+    if n == 4:  # k = 4 = 0b100: j0 = 2 = n-2, no ancilla; c_3 = x_2
+        return Circuit(4, [CNOT(2, 3), X(2)])
+
+    from .library import addconst_k
+
+    k = addconst_k(n)  # == n
+    kb = [(k >> j) & 1 for j in range(n)]
+    j0 = next(j for j in range(n) if kb[j])  # lowest set bit of k
+    low, top = j0 + 1, n - 2  # materialized carry indices c_low .. c_top
+    width = 2 * n - j0 - 2
+    c = Circuit(width)
+    q = lambda j: n + (j - j0 - 1)  # ancilla slot for carry c_j
+
+    c.gates.append(CNOT(j0, q(low)))  # (1) c_{j0+1} = x_{j0}
+    for j in range(low, top):  # (2) c_{j0+2} .. c_{n-2}
+        if kb[j]:  # OR:  c_{j+1} = x_j | c_j
+            c.gates += [CNOT(j, q(j + 1)), CNOT(q(j), q(j + 1)), Toffoli(j, q(j), q(j + 1))]
+        else:  # AND: c_{j+1} = x_j & c_j
+            c.gates.append(Toffoli(j, q(j), q(j + 1)))
+    if kb[top]:  # (3) top-write c_{n-1} into dead bit n-1 (OR case)
+        c.gates += [CNOT(top, n - 1), CNOT(q(top), n - 1), Toffoli(top, q(top), n - 1)]
+    else:
+        c.gates.append(Toffoli(top, q(top), n - 1))
+    if kb[n - 1]:
+        c.gates.append(X(n - 1))
+
+    for j in range(top, low - 1, -1):  # (4) apply sums, uncompute top-down
+        c.gates.append(CNOT(q(j), j))  # s_j ^= c_j
+        if kb[j]:
+            c.gates.append(X(j))
+        if j == low:  # uncompute c_{j0+1} = x_{j0}
+            c.gates.append(CNOT(j0, q(low)))
+        elif kb[j - 1]:  # uncompute c_j (OR, self-inverse while inputs unchanged)
+            c.gates += [CNOT(j - 1, q(j)), CNOT(q(j - 1), q(j)), Toffoli(j - 1, q(j - 1), q(j))]
+        else:
+            c.gates.append(Toffoli(j - 1, q(j - 1), q(j)))
+    c.gates.append(X(j0))  # (5) s_{j0} = NOT x_{j0} (k_{j0}=1, c_{j0}=0) LAST
+    return c
+
+
 def _zigzag_increment(n: int) -> Circuit:
     """Mutation A: ancilla-free zig-zag (CNOT/X layers) — plausible family
     member; the sandbox decides. (Negative control: gets rejected.)"""
@@ -120,6 +205,25 @@ def _inplace_lookahead_increment(n: int) -> Circuit:
     return c
 
 
+def _reverse_increment(n: int) -> Circuit:
+    """AUDITED DUAL: decrementer obtained by reversing the top-write incrementer.
+
+    Every gate in {X, CNOT, Toffoli} is self-inverse, so reversing the gate
+    sequence implements the inverse map: D = I^{-1}, i.e. x -> x-1 mod 2^n.
+    Correctness is therefore free, and the cost equals the incrementer's
+    (borrow propagation is exactly carry propagation read backwards).
+
+    Honest status: this is NOT a new algorithm. The reversed shared-prefix
+    ladder computes the identical unitary at identical cost, so once
+    ``reference:shared-prefix-decrement`` is in the same-spec baseline pool the
+    machine check reports ``duplicate_of``. Keep it as an executable audit:
+    it pins the dual identity and demonstrates the triple gate rejecting a
+    correct-but-unoriginal proposal.
+    """
+    inc = _topwrite_increment(n)
+    return Circuit(inc.n, list(reversed(inc.gates)))
+
+
 GENERATOR_POOL = [
     _lean_interleaved_increment,
     _topwrite_increment,
@@ -142,11 +246,29 @@ class MutatorStandIn:
         return batch
 
 
-def generator_to_candidate(gen, track: str = "B") -> Candidate:
-    """Bind a historical increment generator to the arithmetic specification."""
-    reference = KnownAlgorithmLibrary().synthesize("increment", 1)
-    return reference.implementation(f"invented:{gen.__name__.lstrip('_')}", track, gen)
+def generator_to_candidate(gen, track: str = "B", spec=None) -> Candidate:
+    """Bind a generator program to a problem specification.
 
+    With no ``spec`` the generator is bound to the library increment contract
+    (the family the discovery campaign searches). Passing ``spec`` (for
+    example ``addconst_spec``) binds it to another family; the data always
+    lives in ``[0, n)`` and every qubit above it is declared scratch.
+    """
+    if spec is None:
+        reference = KnownAlgorithmLibrary().synthesize("increment", 1)
+        return reference.implementation(f"invented:{gen.__name__.lstrip('_')}", track, gen)
+
+    def ancilla_fn(n: int) -> list[int]:
+        return list(range(n, gen(n).n))
+
+    return Candidate(
+        f"invented:{gen.__name__.lstrip('_')}",
+        track,
+        gen,
+        spec,
+        lambda n: n,
+        ancilla_fn,
+    )
 
 @dataclass
 class ArchiveEntry:

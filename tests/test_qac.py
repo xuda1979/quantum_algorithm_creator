@@ -33,11 +33,21 @@ from qac.library import (
 from qac.track_b import (
     MutatorStandIn, MAPelitesArchive, run_discovery, generator_to_candidate,
     GENERATOR_POOL, _lean_interleaved_increment, _topwrite_increment,
+    _topwrite_addconst, _reverse_increment,
     _zigzag_increment, _cyclic_increment, _inplace_lookahead_increment,
+)
+from qac.library import (
+    addconst_spec, addconst_k, build_addconst_carry_reference,
+    decrement_spec, build_decrement_wrap_reference,
+)
+from qac.sota_baselines import (
+    build_cuccaro_addconst, build_shared_prefix_decrement, specialized_baselines,
 )
 from qac.problem import IRKind, ProblemIR, triage
 from qac.portfolio import run_agent
-from qac.novelty import InnovationCertificate, certify_innovation, _same_spec, _resources
+from qac.novelty import (
+    InnovationCertificate, certify_innovation, _same_spec, _resources, _fingerprint,
+)
 from qac.library import increment_candidate_ancilla as _inc_cand
 from qac.sota_baselines import (
     sota_baselines, CUCCARO_CITATION, CITATION_SHA256,
@@ -245,6 +255,20 @@ class TestScalingFit:
 
     def test_insufficient_data(self):
         assert fit_scaling({3: 5, 4: 6})["verdict"] == "insufficient_data"
+
+    def test_zero_counts_are_skipped_not_floored(self):
+        # ln(0) is undefined; a synthetic floor used to make zero-Toffoli sizes
+        # masquerade as exponential blowup. Legitimate constant-work algorithms
+        # (e.g. the power-of-two constant adder at n=4) hit exactly this.
+        fit = fit_scaling({3: 1, 4: 0, 5: 5})
+        assert fit["verdict"] == "insufficient_data"
+        assert fit["zero_sizes_skipped"] == {4: 0}
+
+    def test_zero_in_poly_sequence_still_polynomial(self):
+        # Dropping a single zero must not flip a genuine polynomial to exponential.
+        fit = fit_scaling({3: 6, 4: 8, 5: 10, 6: 0, 7: 14})
+        assert fit["verdict"] == "polynomial"
+        assert fit["zero_sizes_skipped"] == {6: 0}
 
 
 # ===========================================================================
@@ -779,5 +803,152 @@ class TestTopwriteAudit:
     def test_historical_replay_does_not_certify_it(self):
         for mode in ("necessity", "opportunity"):
             res = run_discovery(sizes=(3, 4, 5), mode=mode, seed=0, max_batches=2)
+            # With the shared-prefix reference in the pool the top-write circuit
+            # is a structural duplicate, so it is correct but not certified.
             assert res.certificates["invented:topwrite_increment"].correct
             assert not res.succeeded
+
+
+# ===========================================================================
+# Second certified invention family: top-write constant adder x -> x+n mod 2^n
+# ===========================================================================
+
+class TestAddconstInvention:
+    """Locks the second machine-certified family: the three-savings constant
+    adder. Correct x valuable x novel vs known:addconst-carry and
+    sota:cdkm-addconst, Pareto-strict on ALL FOUR axes, and independently
+    re-verified with real Qiskit Statevector evolution (all basis inputs plus a
+    phase-sensitive superposition check)."""
+
+    # Machine-measured costs (n -> width, toffoli, gates, depth).
+    PINNED = {
+        1: (1, 0, 1, 1), 2: (2, 0, 1, 1), 3: (4, 1, 8, 6), 4: (4, 0, 2, 2),
+        5: (8, 5, 16, 14), 6: (9, 5, 16, 14), 7: (12, 9, 27, 23),
+        8: (11, 5, 11, 11),
+    }
+
+    def test_exhaustive_semantics_n1_to_8(self):
+        for n in range(1, 9):
+            rep = check_semantics(_topwrite_addconst(n), addconst_spec(n), n)
+            assert rep.ok, (n, rep.reasons[:3])
+
+    def test_cost_formulas_pinned(self):
+        for n, want in self.PINNED.items():
+            r = _resources(_topwrite_addconst(n))
+            got = (r["width"], r["toffoli"], r["gates"], r["depth"])
+            assert got == want, (n, got, want)
+
+    def test_keeps_data_width_and_packs_ancillas(self):
+        # Every size must hold its data in [0, n) and declare only the scratch
+        # above it, so the evaluator's width check is a real check.
+        for n in range(1, 9):
+            cand = generator_to_candidate(_topwrite_addconst, spec=addconst_spec)
+            circ = _topwrite_addconst(n)
+            assert circ.n >= n
+            assert cand.ancilla(n) == list(range(n, circ.n))
+
+    def test_strictly_dominates_both_same_spec_baselines(self):
+        axes = ("width", "toffoli", "gates", "depth")
+        for n in (3, 4, 5, 6):
+            mine = _resources(_topwrite_addconst(n))
+            known = _resources(build_addconst_carry_reference(n))
+            sota = _resources(build_cuccaro_addconst(n))
+            for name, ref in (("known", known), ("sota", sota)):
+                assert all(mine[a] <= ref[a] for a in axes), (n, name, mine, ref)
+                assert any(mine[a] < ref[a] for a in axes), (n, name, mine, ref)
+
+    def test_triple_certified_all_four_axes_strict(self):
+        cand = generator_to_candidate(_topwrite_addconst, spec=addconst_spec)
+        assert cand.spec(3) == addconst_spec(3)
+        rep = evaluate_candidate(cand, sizes=(3, 4, 5))
+        assert rep.passed, rep.failure_reasons
+        cert = certify_innovation(cand, report=rep)
+        assert cert.certified, cert.reasons
+        assert cert.correct and cert.valuable and cert.novel
+        assert cert.novelty_verdict == "distinct"
+        assert cert.pareto_strict_axes == ["depth", "gates", "toffoli", "width"]
+        assert cert.dominated_baselines == [
+            "known:addconst-carry", "sota:cdkm-addconst",
+        ]
+
+    def test_zero_toffoli_power_of_two_size_not_rejected(self):
+        # addconst_k(n) == n, so even n is a power of two: the adder collapses
+        # to a couple of CNOTs / an X. A zero-Toffoli size must not be read as
+        # exponential blowup by the scaling guardrail.
+        cand = generator_to_candidate(_topwrite_addconst, spec=addconst_spec)
+        rep = evaluate_candidate(cand, sizes=(3, 4, 5))
+        assert rep.passed, rep.failure_reasons
+        assert not any("blowup" in r for r in rep.failure_reasons)
+        assert _topwrite_addconst(4).toffoli_count() == 0
+
+
+# ===========================================================================
+# Decrement family audit — gate reversal is the dual, and the triple gate
+# refuses to certify a correct-but-unoriginal dual
+# ===========================================================================
+
+class TestDecrementDualAudit:
+    """Milestone 7: a decrementer exists, is correct, and is honestly NOT novel.
+
+    Since every gate in {X, CNOT, Toffoli} is self-inverse, reversing an
+    incrementer's gate list implements the inverse map x -> x-1 mod 2^n at the
+    incrementer's exact cost. That means the decrement family is closed under
+    reversal: no reversal-based construction can be a new algorithm once a
+    same-spec shared-prefix decrement reference is a baseline. These tests lock
+    that machine verdict instead of claiming a third certified family.
+    """
+
+    # Machine-measured costs (n -> width, toffoli, gates, depth).
+    PINNED = {
+        1: (1, 0, 1, 1), 2: (2, 0, 2, 2), 3: (3, 1, 3, 3), 4: (5, 3, 6, 6),
+        5: (7, 5, 9, 9), 6: (9, 7, 12, 12), 7: (11, 9, 15, 15),
+        8: (13, 11, 18, 18), 9: (15, 13, 21, 21), 10: (17, 15, 24, 24),
+        11: (19, 17, 27, 27), 12: (21, 19, 30, 30), 13: (23, 21, 33, 33),
+    }
+
+    def test_exhaustive_semantics_n1_to_8(self):
+        for n in range(1, 9):
+            rep = check_semantics(_reverse_increment(n), decrement_spec(n), n)
+            assert rep.ok, (n, rep.reasons[:3])
+
+    def test_cost_formulas_pinned(self):
+        for n, want in self.PINNED.items():
+            r = _resources(_reverse_increment(n))
+            got = (r["width"], r["toffoli"], r["gates"], r["depth"])
+            assert got == want, (n, got, want)
+
+    def test_reversal_equals_shared_prefix_fingerprint(self):
+        # The reversed top-write ladder is the same unitary, on a cheaper
+        # schedule, as the reversed shared-prefix ladder: identical fingerprints.
+        for n in range(1, 14):
+            assert (_fingerprint(_reverse_increment(n))
+                    == _fingerprint(build_shared_prefix_decrement(n))), n
+
+    def test_shared_prefix_decrement_is_a_same_spec_baseline(self):
+        lib = KnownAlgorithmLibrary()
+        dec = specialized_baselines(lib)
+        assert "decrement" in dec
+        assert dec["decrement"].id == "reference:shared-prefix-decrement"
+        rep = evaluate_candidate(dec["decrement"], sizes=tuple(range(1, 9)))
+        assert rep.passed, rep.failure_reasons
+
+    def test_dual_dominates_padded_wrap_but_is_not_novel(self):
+        cand = generator_to_candidate(_reverse_increment, spec=decrement_spec)
+        rep = evaluate_candidate(cand, sizes=tuple(range(2, 9)))
+        assert rep.passed, rep.failure_reasons
+        cert = certify_innovation(cand, report=rep, extended_sizes=tuple(range(1, 10)))
+        assert cert.correct
+        assert not cert.novel
+        assert not cert.certified
+        assert cert.novelty_verdict == "duplicate_of:reference:shared-prefix-decrement"
+        # Still strictly better than the textbook wrap reference, which pads a
+        # full ancilla register: the "discovery" is real progress over the
+        # library, just not a new algorithm.
+        assert "known:decrement-wrap" in cert.dominated_baselines
+
+    def test_dual_beats_wrap_on_width_and_gates_at_n8(self):
+        mine = _resources(_reverse_increment(8))
+        wrap = _resources(build_decrement_wrap_reference(8))
+        assert mine["width"] < wrap["width"]   # 13 < 15
+        assert mine["gates"] < wrap["gates"]   # 18 < 38
+        assert mine["depth"] < wrap["depth"]   # 18 < 24

@@ -262,10 +262,25 @@ def fit_scaling(counts: dict[int, int]) -> dict:
 
     verdict 'exponential' (e.g. hidden O(2^n) blowup from brute-force
     unrolling) is penalized/rejected by the sandbox.
+
+    Sizes whose count is zero are skipped rather than clamped to a synthetic
+    floor: ln(0) is undefined, and clamping it to ln(1e-12) ≈ -27.6 dominates
+    the regression, so a legitimately constant-work size (a constant adder
+    whose addend is a power of two needs no Toffolis at all) would masquerade
+    as exponential blowup. Fitting only positive counts is the honest reading
+    of the data; when fewer than three positive sizes remain the guardrail
+    reports 'insufficient_data' and does not reject.
     """
-    ns = sorted(n for n, count in counts.items() if count > 0)
+    skipped = {k: counts[k] for k in sorted(counts) if counts[k] <= 0}
+    ns = sorted(k for k, v in counts.items() if v > 0)
     if len(ns) < 3:
-        return {"poly_exp": None, "poly_r2": None, "expo_r2": None, "verdict": "insufficient_data"}
+        return {
+            "poly_exp": None,
+            "poly_r2": None,
+            "expo_r2": None,
+            "verdict": "insufficient_data",
+            "zero_sizes_skipped": skipped,
+        }
     ys = [float(counts[k]) for k in ns]
     ln_y = [math.log(y) for y in ys]
 
@@ -298,6 +313,7 @@ def fit_scaling(counts: dict[int, int]) -> dict:
         "poly_r2": round(powfit[0], 4),
         "expo_r2": round(linfit_exp[0], 4),
         "verdict": verdict,
+        "zero_sizes_skipped": skipped,
     }
 
 
