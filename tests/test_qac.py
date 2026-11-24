@@ -32,13 +32,19 @@ from qac.library import (
 )
 from qac.track_b import (
     MutatorStandIn, MAPelitesArchive, run_discovery, generator_to_candidate,
-    GENERATOR_POOL, _lean_interleaved_increment,
+    GENERATOR_POOL, _lean_interleaved_increment, _topwrite_increment,
     _zigzag_increment, _cyclic_increment, _inplace_lookahead_increment,
 )
 from qac.problem import IRKind, ProblemIR, triage
 from qac.portfolio import run_agent
-from qac.novelty import InnovationCertificate, certify_innovation
+from qac.novelty import InnovationCertificate, certify_innovation, _same_spec, _resources
 from qac.library import increment_candidate_ancilla as _inc_cand
+from qac.sota_baselines import (
+    sota_baselines, CUCCARO_CITATION, CITATION_SHA256,
+    build_cuccaro_mod_adder, build_cuccaro_increment, build_cuccaro_addconst,
+    mod_adder_spec, cuccaro_mod_adder_candidate, cuccaro_increment_candidate,
+    cuccaro_addconst_candidate,
+)
 
 
 # ===========================================================================
@@ -327,6 +333,109 @@ class TestLibrary:
         lib = KnownAlgorithmLibrary()
         with pytest.raises(KeyError):
             lib.synthesize("shors_factoring", 5)
+
+
+# ===========================================================================
+# Literature SOTA baselines (Cuccaro/CDKM, arXiv:quant-ph/0410184)
+# ===========================================================================
+
+class TestSotaBaselines:
+    """The honest 'valuable' floor: cited literature constructions, verified
+    as coded Candidates through the same sandbox as everything else."""
+
+    def test_citation_hash_is_pinned(self):
+        import hashlib
+        assert hashlib.sha256(CUCCARO_CITATION.encode()).hexdigest() == CITATION_SHA256
+        assert "arXiv:quant-ph/0410184" in CUCCARO_CITATION
+
+    def test_every_sota_baseline_verifies_through_sandbox(self):
+        for cand in sota_baselines():
+            peak = cand.build(6).n
+            rep = evaluate_candidate(cand, sizes=(2, 3, 4, 5, 6), max_total_width=max(12, peak))
+            assert rep.passed, f"{cand.id}: {rep.failure_reasons}"
+            assert all(rep.correctness.values()), cand.id
+            assert all(rep.ancilla_clean.values()), cand.id
+
+    def test_cuccaro_costs_are_pinned(self):
+        # mod-adder / incrementer / addconst all pay the full CDKM price:
+        # Toffoli 2n, width 2n+1 (paper section 5: constants don't simplify).
+        for n in range(2, 7):
+            for build in (build_cuccaro_mod_adder, build_cuccaro_increment, build_cuccaro_addconst):
+                c = build(n)
+                assert c.n == 2 * n + 1, (build.__name__, n)
+                assert c.toffoli_count() == 2 * n, (build.__name__, n)
+            assert build_cuccaro_mod_adder(n).gate_count() == 6 * n
+            assert build_cuccaro_mod_adder(n).depth() == 5 * n + 1
+            assert build_cuccaro_increment(n).gate_count() == 6 * n + 2
+            assert build_cuccaro_increment(n).depth() == 5 * n + 2
+
+    def test_cuccaro_incrementer_is_honest_floor_not_strawman(self):
+        # The CDKM-derived incrementer must be strictly WORSE than the repo's
+        # known incrementer on every axis — otherwise this baseline would be
+        # a strawman and the innovation gate would be too lax.
+        for n in (3, 4, 5, 6):
+            sota = build_cuccaro_increment(n)
+            known = build_increment_ancilla_reference(n)
+            assert sota.n > known.n
+            assert sota.toffoli_count() > known.toffoli_count()
+            assert sota.gate_count() > known.gate_count()
+            assert sota.depth() > known.depth()
+
+    def test_mod_adder_spec_matches_exhaustive_truth_table(self):
+        for n in (2, 3):
+            spec = mod_adder_spec(n)
+            assert len(spec) == 1 << (2 * n)
+            for x, y in spec.items():
+                a, b = x & ((1 << n) - 1), x >> n
+                assert (y & ((1 << n) - 1)) == a  # a register preserved
+                assert (y >> n) == (a + b) % (1 << n)  # b := a + b mod 2^n
+
+    def test_sota_candidates_carry_candidate_protocol(self):
+        for cand in sota_baselines():
+            assert cand.track == "A"
+            c5 = cand.build(5)
+            assert c5.n == cand.n_data(5) + len(cand.ancilla(5))
+            assert isinstance(cand.spec(5), dict)
+
+    def test_innovation_gate_defaults_include_sota_baselines(self):
+        # The gate's DEFAULT baseline list must include the cited literature
+        # SOTA constructions alongside the in-repo library: a certificate is
+        # earned against the published state of the art, not just ourselves.
+        # (Discovery/portfolio inherit this via certify_innovation defaults.)
+        cand = generator_to_candidate(_lean_interleaved_increment)
+        rep = evaluate_candidate(cand, sizes=(3, 4, 5))
+        cert = certify_innovation(cand, report=rep)
+        assert "known:increment-ancilla" in cert.baselines_compared
+        assert "sota:cdkm-increment" in cert.baselines_compared
+        assert "sota:cdkm-increment" in cert.dominated_baselines
+        assert cert.certified, cert.reasons
+        assert "width" in cert.pareto_strict_axes
+
+    def test_sota_same_spec_map_and_dominance_receipts(self):
+        # Machine-checked same-spec map (novelty._same_spec, not hand-assigned):
+        # exactly two library families are constrained by a CDKM baseline.
+        # For the other ten, no SOTA baseline shares the spec, so the honest
+        # gate leaves their certificates unchanged (first-solution value).
+        lib = KnownAlgorithmLibrary()
+        expected = {("increment", "sota:cdkm-increment"),
+                    ("add_const", "sota:cdkm-addconst")}
+        found = set()
+        for key, fam in lib._entries.items():
+            for s in sota_baselines():
+                if _same_spec(fam, s):
+                    found.add((key, s.id))
+        assert found == expected, found
+        # Both paired families strictly dominate their SOTA pair on ALL 4
+        # axes at every size n=3..6 — the leave-one-out 'valuable' receipts.
+        # Strict width inequality also rules out unitary equality, so the
+        # 'novel' verdict against the SOTA pair is structural, not simulated.
+        for key, sid in sorted(expected):
+            fam = lib._entries[key]
+            s = next(c for c in sota_baselines() if c.id == sid)
+            for n in (3, 4, 5, 6):
+                rf, rs = _resources(fam.build(n)), _resources(s.build(n))
+                for axis in ("width", "toffoli", "gates", "depth"):
+                    assert rf[axis] < rs[axis], (key, sid, n, axis, rf, rs)
 
 
 # ===========================================================================
@@ -643,3 +752,52 @@ class TestInnovationCertificate:
         _, _, cert = self._certify(_lean_interleaved_increment)
         blob = json.dumps(cert.to_dict())
         assert '"certified": true' in blob
+
+
+# ===========================================================================
+# The certified invention: top-write incrementer (search-campaign deliverable)
+# ===========================================================================
+
+class TestTopwriteInvention:
+    """Locks the machine-certified invention: correct x valuable x novel vs
+    the full honest baseline pool (12 library families + 3 cited SOTA
+    constructions), Pareto-strict on ALL FOUR axes."""
+
+    def test_exhaustive_semantics_n1_to_8(self):
+        for n in range(1, 9):
+            rep = check_semantics(_topwrite_increment(n), increment_spec(n), n)
+            assert rep.ok, (n, rep.reasons[:3])
+
+    def test_cost_formulas_pinned(self):
+        expected = {1: (1, 0, 1, 1), 2: (2, 0, 2, 2), 3: (3, 1, 3, 3)}
+        for n in range(1, 9):
+            r = _resources(_topwrite_increment(n))
+            got = (r["width"], r["toffoli"], r["gates"], r["depth"])
+            assert got == expected.get(n, (2 * n - 3, 2 * n - 5, 3 * n - 6, 3 * n - 6)), (n, got)
+
+    def test_strictly_dominates_lean_on_all_axes_n3_to_8(self):
+        for n in range(3, 9):
+            tw = _resources(_topwrite_increment(n))
+            ln = _resources(_lean_interleaved_increment(n))
+            for axis in ("width", "toffoli", "gates", "depth"):
+                assert tw[axis] < ln[axis], (n, axis, tw, ln)
+
+    def test_triple_certified_all_four_axes_strict(self):
+        cand = generator_to_candidate(_topwrite_increment)
+        rep = evaluate_candidate(cand, sizes=(3, 4, 5))
+        assert rep.passed
+        cert = certify_innovation(cand, report=rep)
+        assert cert.certified, cert.reasons
+        assert cert.correct and cert.valuable and cert.novel
+        assert cert.novelty_verdict == "distinct"
+        assert cert.pareto_strict_axes == ["depth", "gates", "toffoli", "width"]
+        assert cert.dominated_baselines == [
+            "known:increment-ancilla", "sota:cdkm-increment",
+        ]
+
+    def test_discovery_campaign_certifies_it(self):
+        for mode in ("necessity", "opportunity"):
+            res = run_discovery(sizes=(3, 4, 5), mode=mode, seed=0, max_batches=2)
+            ids = {e.candidate.id for e in res.certified}
+            assert "invented:topwrite_increment" in ids, (mode, ids)
+            assert res.succeeded

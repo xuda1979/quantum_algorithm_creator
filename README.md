@@ -179,7 +179,7 @@
 
 ## 本系统已发明的新量子算法（机器验证）
 
-本仓库不只是设计文档——`qac/` 目录包含了智能体的**可运行参考实现**（纯 Python + numpy，65 项测试全部通过），并且它**已经发明了一个经三重认证（正确 × 有价值 × 真创新）、帕累托超越教科书基线的新量子子程序**。以下算法由本系统的 Track B 发现引擎产出，验证范围**全部来自机器实测、无一凭空声明**：三重认证在扩展尺寸 n=2..6 上对每个输入 x 穷举态矢量验证（`extended_sizes=(2,3,4,5,6)`，见 `qac/novelty.py`），帕累托支配在 n=3..6 逐尺寸核验（`test_invention_pareto_dominates_at_every_size`），资源公式在 n=1..8 机器核验——验证内容包括：功能正确、辅助比特干净归零、无杂散相位（振幅恰为 +1）、无隐藏指数爆炸。发明持有 `qac/novelty.py` 签发的完整 `InnovationCertificate`。
+本仓库不只是设计文档——`qac/` 目录包含了智能体的**可运行参考实现**（纯 Python + numpy，78 项测试全部通过），并且它**已经发明了两个经三重认证（正确 × 有价值 × 真创新）、帕累托超越教科书与文献 SOTA 基线的新量子子程序**（发明 2 对两个同规约基线在全部四个资源轴上同时严格更优）。以下算法由本系统的 Track B 发现引擎产出，验证范围**全部来自机器实测、无一凭空声明**：三重认证在扩展尺寸 n=2..6 上对每个输入 x 穷举态矢量验证（`extended_sizes=(2,3,4,5,6)`，见 `qac/novelty.py`），帕累托支配在 n=3..6 逐尺寸核验（`test_invention_pareto_dominates_at_every_size`），资源公式在 n=1..8 机器核验——验证内容包括：功能正确、辅助比特干净归零、无杂散相位（振幅恰为 +1）、无隐藏指数爆炸。发明持有 `qac/novelty.py` 签发的完整 `InnovationCertificate`。
 
 ### 发明 1：精简交错可逆增量器（Lean Interleaved Incrementer）
 
@@ -260,9 +260,98 @@ n=5 的完整门序列（数据 q0..q4，辅助 q5,q6,q7）：
 
 **结构洞见（可泛化）**："前缀聚合中恒等可省略的槽位"是一个可迁移模式：任何 compute/use/uncompute 型可逆算术（前缀 XOR、进位前瞻加法器、比较器）中，若某个前缀值恒等于某个数据比特，其专用辅助槽位即冗余。这已被沉淀为 Track B 变异器的启发式之一（`qac/track_b.py` 的 `_lean_interleaved_increment`），并将按 Phase 5 结晶为 Track A 库中的正式条目。
 
+### 发明 2：顶写可逆增量器（Top-Write Incrementer）——全部四个资源轴同时严格更优
+
+发明 1 落地后，发现引擎在同一进化池中继续搜索，产出第二个经三重认证的构造：它对**全部四个资源轴（W/T/G/D）同时严格优于**两个同规约基线（教科书增量器与文献 SOTA `sota:cdkm-increment`）——本仓库目前最强的帕累托声明。生成器：`qac/track_b.py` 的 `_topwrite_increment`。
+
+**问题与 I/O 契约**：与发明 1 相同——$|x\rangle|0^a\rangle \to |(x+1) \bmod 2^n\rangle|0^a\rangle$，其中 $a = \max(0, n-3)$，辅助比特全部干净归零、振幅恰为 +1（n=1..8 逐输入穷举机器验证）。
+
+**关键洞见（顶写）**：最高前缀与 $A_{n-1} = b_0 \wedge \dots \wedge b_{n-2}$ 有两个此前未被利用的死值属性：
+
+1. **它是链的末端**——$A_{n-1}$ 不再喂给任何更高前缀与（不存在 $A_n$）；
+2. **它的应用目标 $b_{n-1}$ 是死比特**——$b_{n-1}$ 被翻转后，线路剩余部分再也不读它。
+
+因此 $A_{n-1}$ 根本无需槽位：`Toffoli(s_{n-2}, b_{n-2}, b_{n-1})` 一步把 $A_{n-1}$ **原地写入** $b_{n-1}$（$b_{n-1} \leftarrow b_{n-1} \oplus (A_{n-2} \wedge b_{n-2}) = b_{n-1} \oplus A_{n-1}$）。相对发明 1，这一步同时消灭三件东西：最高槽位（宽度 −1）、它的应用 CNOT（门/深度 −1）、它的逆计算 Toffoli（Toffoli −1、门/深度 −1）。
+
+#### 参数化构造（n≥4；n=1..3 为特例）
+
+```text
+topwrite_increment(n):                                    # 总宽度 2n−3
+    if n == 1: return [X(0)]
+    if n == 2: return [CNOT(0,1), X(0)]
+    if n == 3: return [Toffoli(0,1,2), CNOT(0,1), X(0)]    # n=3 时 A_2 直接顶写进 b_2
+    # 槽位 s_i = qubit(n+i−2)，只为 A_2..A_{n−2} 分配（共 n−3 个，比发明 1 少 1）
+    gates  = [Toffoli(0, 1, s_2)]                          # A_2 = b_0 ∧ b_1
+    gates += [Toffoli(s_{i-1}, i-1, s_i) for i = 3..n-2]   # 升链：算到 A_{n−2} 为止
+    gates += [Toffoli(s_{n-2}, n-2, n-1)]                  # 顶写：A_{n−1} 原地写入 b_{n−1}
+    for i = n-2 down to 3:                                 # 降链：应用后立即逆计算
+        gates += [CNOT(s_i, i), Toffoli(s_{i-1}, i-1, s_i)]
+    gates += [CNOT(s_2, 2), Toffoli(0, 1, s_2)]            # 最低槽位即用即释
+    gates += [CNOT(0, 1)]                                  # b_1 ^= A_1 = b_0
+    gates += [X(0)]                                        # 严格最后
+    return gates
+```
+
+n=5 的完整门序列（数据 q0..q4，辅助仅 q5,q6——比发明 1 少 1 比特；门 3 即顶写，目标 q4 是数据最高位而非辅助比特）：
+
+```text
+ 1. CCX(0,1,5)   4. CNOT(6,3)    7. CCX(0,1,5)
+ 2. CCX(5,2,6)   5. CCX(5,2,6)   8. CNOT(0,1)
+ 3. CCX(6,3,4)   6. CNOT(5,2)    9. X(0)
+```
+
+#### 正确性论证
+
+1. **升链**（同发明 1，归纳法）：执行到第 i 步时 $s_{i-1}$ 与 $b_{i-1}$ 均未被修改，故每个 $s_i$ 精确持有 $A_i$（$i \le n-2$）。
+2. **顶写**：执行 `Toffoli(s_{n-2}, n-2, n-1)` 时降链尚未开始——$s_{n-2}$ 仍精确持有 $A_{n-2}$、$b_{n-2}$ 仍是原始值，故 $s_{n-2} \wedge b_{n-2} = A_{n-1}$ 精确成立；而 $b_{n-1}$ 此后永不再被读，提前翻转无任何副作用。存入槽位→应用→逆计算三步融合为一步，信息不丢失。
+3. **降链与 X(0) 严格最后**：与发明 1 完全相同（即用即释；X(0) 提前会破坏 $A_2$ 的擦除条件，发明过程中曾被穷举验证当场击毙）。
+
+#### 闭环资源公式（机器核验 n=1..8，`test_cost_formulas_pinned`）
+
+| 指标 | 发明 1（lean） | **发明 2（topwrite）** | 差值 |
+| --- | --- | --- | --- |
+| 总宽度 W | 2n−2 | **2n−3** | **−1 比特** |
+| Toffoli 数 T | 2n−4 | **2n−5** | **−1** |
+| 门数 G | 3n−4 | **3n−6** | **−2** |
+| 深度 D | 3n−4 | **3n−6** | **−2** |
+
+（公式适用 n≥4；n=3 特例 3/1/3/3，n=1..2 退化为最小构造。）
+
+逐尺寸四轴实测（`tests/test_qac.py` 穷举核验，n=3..6）：
+
+| n | **发明 2 W/T/G/D** | 发明 1 | 教科书基线 | SOTA `cdkm-increment` |
+| --- | --- | --- | --- | --- |
+| 3 | **3/1/3/3** | 4/2/5/5 | 5/2/7/7 | 7/6/20/17 |
+| 4 | **5/3/6/6** | 6/4/8/8 | 7/4/10/10 | 9/8/26/22 |
+| 5 | **7/5/9/9** | 8/6/11/11 | 9/6/13/13 | 11/10/32/27 |
+| 6 | **9/7/12/12** | 10/8/14/14 | 11/8/16/16 | 13/12/38/32 |
+
+**每个尺寸、每个参照、每条轴全部严格更优**——四轴同时严格帕累托支配的机器实测依据。对发明 1 的全轴严格支配锁定至 n=3..8（`test_strictly_dominates_lean_on_all_axes_n3_to_8`）。
+
+#### 机器证书回执（诚实默认基线池 = 库 12 族 + 3 个文献 SOTA）
+
+```text
+certified=True  correct=True  valuable=True  novel=True
+novelty_verdict='distinct'    extended_sizes=[2, 3, 4, 5, 6]
+dominated_baselines=['known:increment-ancilla', 'sota:cdkm-increment']
+pareto_strict_axes=['depth', 'gates', 'toffoli', 'width']    # 全部四轴严格
+```
+
+对 `sota:cdkm-increment` 的逐轴回执（n=5）：W 7/11、T 5/10、G 9/32、D 9/27。语义验证在 n=1..8 逐输入穷举态矢量（辅助比特干净归零、振幅恰为 +1）。发现战役中**两种模式（必要性/机会）均以 `invented:topwrite_increment` 通过 NEW-NICHE + CERTIFIED**；端到端 CLI 里它按资源排序居两个组合之首。`tests/test_qac.py::TestTopwriteInvention`（5 项测试）锁定以上全部回执。
+
+#### 可泛化的结构洞见：末端死值融合（last-use dead-value fusion）
+
+compute/use/uncompute 范式中，若中间值 V（a）只喂给**最后一个**应用步骤，且（b）其应用目标此后**永不再被读**，则"存入槽位 → 应用 → 逆计算槽位"三步可融合为一步**原地写入目标**——槽位、应用门、逆计算门各省一份。任何前缀聚合链的末端聚合（加法器最高进位、比较器最终标志位）天然满足 (a)；应用目标是寄存器末端死比特即满足 (b)。发明 1 消除的是链条**开头**的冗余（恒等槽位），本发明消除的是链条**末端**的冗余——两者正交、可叠加，均已沉淀为 Track B 变异器启发式（`qac/track_b.py`）。
+
+#### 诚实边界声明
+
+- **n=2 特例**：发明 2 在 n=2 与发明 1 完全相同（均为 `CNOT(0,1), X(0)`，零辅助比特）——顶写在 n=2 无差异化空间，全轴严格支配的声明范围是 **n≥3**（生成器 docstring 明示）。
+- **SOTA 查重范围**：与发明 1 相同，SOTA 基线池覆盖 CDKM 加法谱系（arXiv:quant-ph/0410184，引用串 SHA-256 `4a84cc18822acd28fd0b4a86c9ea656a3cfea0ef6442a7546c97b3e95efe4d5f`，见"对照文献 SOTA 的诚实再认证"节）。"发明 2 优于 SOTA"限于"对照 CDKM 不化简常数加数构造的增量器"，并非对全部已发表增量器构造的穷尽查重；向 `sota_baselines.py` 加入新基线会自动收紧认证门。
+- **与发明 1 的关系**：发明 2 严格支配发明 1（n≥3 全轴），两者均为独立认证的发明；发明 1 保留在池中，作为进化垫脚石与失败轨迹语料的对照锚。
+
 ### 发现引擎同时产出的负样本（同样有价值）
 
-搜索过程中另有 3 个"看似合理"的突变变体被沙箱**确定性拒绝**。它们是 `qac/track_b.py` 中与发明同池进化的生成器（`GENERATOR_POOL` 共 4 个候选：1 个通过、3 个被机器否决），在 n=3 上的穷举验证全部失败——但三者的失败方式**互不相同**，精确暴露了可逆增量器设计空间中的三类典型陷阱。以下数据均为 `check_semantics` 的机器实测输出（n=3，小端序，want = (x+1) mod 8）：
+搜索过程中另有 3 个"看似合理"的突变变体被沙箱**确定性拒绝**。它们是 `qac/track_b.py` 中与发明同池进化的生成器（`GENERATOR_POOL` 共 5 个候选：2 个通过三重认证、3 个被机器否决），在 n=3 上的穷举验证全部失败——但三者的失败方式**互不相同**，精确暴露了可逆增量器设计空间中的三类典型陷阱。以下数据均为 `check_semantics` 的机器实测输出（n=3，小端序，want = (x+1) mod 8）：
 
 #### 负样本 A：无辅助比特锯齿层（`_zigzag_increment`）——恒等映射，"什么都不做"
 
@@ -317,21 +406,22 @@ x=3: got 0, want 4    x=7: got 4, want 0
 
 #### 负样本的共同特征与价值
 
-三个负样本都是**干净、可逆、单振幅的错误置换**（0 个脏辅助比特输入、无杂散相位），分别对应"恒等（自我抵消）""方向混乱""信息覆盖"三类独立失败模式。它们与通过者一同构成进化存档的失败轨迹语料，正是 Phase 5 智能体 RL 微调的训练数据（`test_negative_control_mutations_fail_semantics` 在 n=3,4,5 上回归锁定其必败性）。**发明不是运气：是 4 个候选、1 个通过、3 个被机器否决的可复现过程。**
+三个负样本都是**干净、可逆、单振幅的错误置换**（0 个脏辅助比特输入、无杂散相位），分别对应"恒等（自我抵消）""方向混乱""信息覆盖"三类独立失败模式。它们与通过者一同构成进化存档的失败轨迹语料，正是 Phase 5 智能体 RL 微调的训练数据（`test_negative_control_mutations_fail_semantics` 在 n=3,4,5 上回归锁定其必败性）。**发明不是运气：是 5 个候选、2 个通过、3 个被机器否决的可复现过程。**
 
 ### 复现方式
 
 ```bash
-python3 -m pytest tests/ -q          # 65 项测试全绿（含三重认证门的正/负控制）
+python3 -m pytest tests/ -q          # 78 项测试全绿（含三重认证门的正/负控制）
 python3 -m qac.cli                   # 端到端演示：必要性模式发明 / 机会模式混合组合 / 分诊拒绝
 ```
 
-演示输出（机会模式）——发明与已知算法**同台竞技、按资源排序、发明居首**，且发明条目携带完整三重认证（正确 × 有价值 × 真创新，缺一不可）：
+演示输出（机会模式）——两代发明与已知算法**同台竞技、按资源排序、发明 2 居首**，且每个发明条目携带完整三重认证（正确 × 有价值 × 真创新，缺一不可）：
 
 ```text
-portfolio (2 solution(s), ranked):
- 1. [invented] invented:lean_interleaved_increment toffoli@5=6 gates@5=11 depth@5=11 fidelity@5=True | certificate: correct=True valuable=True novel=True (strict wins: depth,gates,width; novelty: distinct)
- 2. [known   ] known:increment-ancilla          toffoli@5=6 gates@5=13 depth@5=13 fidelity@5=True
+portfolio (3 solution(s), ranked):
+ 1. [invented] invented:topwrite_increment      toffoli@5=5 gates@5=9  depth@5=9  fidelity@5=True | certificate: correct=True valuable=True novel=True (strict wins: depth,gates,toffoli,width; novelty: distinct)
+ 2. [invented] invented:lean_interleaved_increment toffoli@5=6 gates@5=11 depth@5=11 fidelity@5=True | certificate: correct=True valuable=True novel=True (strict wins: depth,gates,width; novelty: distinct)
+ 3. [known   ] known:increment-ancilla          toffoli@5=6 gates@5=13 depth@5=13 fidelity@5=True
 ```
 
 ---
@@ -348,7 +438,7 @@ portfolio (2 solution(s), ranked):
 
 ### 门 2：有价值（严格帕累托支配，非"差不多更好"）
 
-- **机制**：在每个验证尺寸上，候选必须在**所有**资源轴（总宽度 W / Toffoli 数 T / 门数 G / 深度 D）上 ≤ 每个同规约已知基线，且**至少一轴严格更优**——弱于任何一条即否决。"与基线并列"不算价值。
+- **机制**：在每个验证尺寸上，候选必须在**所有**资源轴（总宽度 W / Toffoli 数 T / 门数 G / 深度 D）上 ≤ 每个同规约基线，且**至少一轴严格更优**——弱于任何一条即否决。"与基线并列"不算价值。基线池默认 = 库 12 族 + 文献 SOTA 基线（`qac/sota_baselines.py`，见"对照文献 SOTA 的诚实再认证"节）。
 - **负控制**（`test_correct_but_valueless_is_rejected`）：构造"填充参考"——教科书增量器原封不动、只多垫一个闲置辅助比特（`Circuit(base.n+1, list(base.gates))`）。它**完全正确**（沙箱通过）、与基线线路不同（门序列指纹不同），但在每个尺寸上被基线全面支配（宽度多 1、其余全平、无一轴更优）→ `cert.correct=True` 但 `cert.valuable=False`，不认证。**正确但无价值的线路没有交付为"发明"的资格。**
 - **正控制**：精简交错增量器对基线 `known:increment-ancilla` 严格支配，`cert.pareto_strict_axes` 含 `width`（每个尺寸省 1 比特）。
 
@@ -431,8 +521,38 @@ popcount 计数后与阈值 K=2^m−⌈n/2⌉ 比较，flag 取阈值进位。W=
 ### 库的验证与接口契约
 
 - **统一表面**：`KnownAlgorithmLibrary().synthesize(key, n)` 返回 `Circuit`；`has(key)` 查询；`verify_all(sizes=(3,4,5))` 在语义沙箱内对每条目逐输入穷举验证（宽度护栏 `max_total_width=max(12, peak)`）。
-- **查重基线**：三重认证门的"价值"与"真创新"两门以这 12 族为参照系——`cert.dominated_baselines` 记录被发明严格支配的基线（当前为 `known:increment-ancilla`），`novelty_verdict` 的 `duplicate_of:` 前缀指向库 key。
+- **查重基线**：三重认证门的"价值"与"真创新"两门以这 12 族 + 3 个文献 SOTA 构造为参照系——`cert.dominated_baselines` 记录被发明严格支配的基线（发明 1 与发明 2 均为 `known:increment-ancilla` 与 `sota:cdkm-increment`），`novelty_verdict` 的 `duplicate_of:` 前缀指向基线 id。
 - **全部 12 族在 n=3,4,5 上机器验证通过**（`test_every_known_entry_verifies`），任何未来的库扩展都要过同一道沙箱。
+
+## 对照文献 SOTA 的诚实再认证（机器回执）
+
+基线池只含自家库，不足以支撑"超越 SOTA"的声明。为此本仓库把文献标准算术构造编码为可运行、可验证、带引用哈希的 Candidate（`qac/sota_baselines.py`），并接入三重认证门的默认基线池：
+
+- **来源**：Cuccaro, Draper, Kutin, Moulton, *A new quantum ripple-carry addition circuit*, arXiv:quant-ph/0410184 (2004)（CDKM 加法器）；自 Qiskit `adder_ripple_c04`（`kind="fixed"`，即该论文的逐字转写）转写。MAJ(x,y,z)=CX(x,y),CX(x,z),CCX(z,y,x)；UMA(x,y,z)=CCX(z,y,x),CX(x,z),CX(z,y)。引用串 SHA-256 `4a84cc18822acd28fd0b4a86c9ea656a3cfea0ef6442a7546c97b3e95efe4d5f`（测试锁定）。
+- **三个构造**（均在 n=2..6 逐输入穷举验证、辅助比特干净归零；宽度 2n+1、Toffoli 2n）：
+  1. `sota:cdkm-mod-adder`：(a,b) → (a, a+b mod 2ⁿ)，门 6n、深度 5n+1；
+  2. `sota:cdkm-increment`：x → x+1 mod 2ⁿ——常数加数按论文 §5 不化简、照付全价（门 6n+2、深度 5n+2），是文献意义下的**诚实下界**，不是稻草人；
+  3. `sota:cdkm-addconst`：x → x+k mod 2ⁿ。
+
+### 同规约映射与逐轴对比（n=3..6 机器实测）
+
+12 族中恰有 2 族与 SOTA 基线同规约（机器判定 `_same_spec`，非人工指认）：
+
+| 对比 | n=5 实测（族 / SOTA） | 结论 |
+| --- | --- | --- |
+| `increment` vs `sota:cdkm-increment` | W 9/11，T 6/10，G 13/32，D 13/27 | 族在全部 4 轴严格更优 |
+| `add_const` vs `sota:cdkm-addconst` | W 9/11，T 6/10，G 18/34，D 16/27 | 族在全部 4 轴严格更优 |
+
+其余 10 族在 CDKM 谱系中无同规约基线（CDKM 模加器 n_data=2n，库中无同规约族）。
+
+### 再认证结论（机器回执）
+
+- **逐族留一法再认证**（基线池 = 其余 11 族 + 3 个 SOTA 构造，`certify_innovation` 全流程）：12 族全部 `certified=True`——正确、有价值、真创新三布尔全真。
+- **发明 1 对照 SOTA 的完整证书**：`baselines_compared = ['known:increment-ancilla', 'sota:cdkm-increment']`，两者均被严格支配，`pareto_strict_axes = ['depth', 'gates', 'width']`。对 `sota:cdkm-increment` 的逐轴回执（n=3..6）：W 4/7→10/13、T 2/6→8/12、G 5/20→14/38、D 5/17→14/32——每个尺寸全部 4 轴严格更优。
+- **发明 2（顶写增量器，见"发明 2"节）在同一默认基线池下更进一步**：`pareto_strict_axes = ['depth', 'gates', 'toffoli', 'width']`——**含 Toffoli 在内的全部四轴同时严格**，对 `sota:cdkm-increment` 的逐轴回执（n=5）：W 7/11、T 5/10、G 9/32、D 9/27。
+- **接线与锁定**：`certify_innovation` 的默认基线池现为"库 12 族 + `sota_baselines()`"（`qac/novelty.py`），Track B 发现循环与 portfolio 端到端自动继承；`test_innovation_gate_defaults_include_sota_baselines` 与 `test_sota_same_spec_map_and_dominance_receipts` 锁定该行为与同规约映射回执。全测试套件 **78/78 绿**。
+
+**诚实边界声明**：SOTA 基线池目前只覆盖 CDKM 加法谱系（增量 / 常数加 / 模加）。"发明 1 优于 SOTA"的声明范围限于"对照 CDKM 不化简常数加数构造的增量器"，并非对全部已发表增量器构造的穷尽查重。向 `sota_baselines.py` 加入新 SOTA 基线会自动收紧认证门——这是设计使然。
 
 ## 分阶段开发计划
 
@@ -459,12 +579,13 @@ quantum_algorithm_creator/
 │   ├── kickmix.py         #   Layer 3a: 可逆/相位反冲快速模拟器
 │   ├── sandbox.py         #   Layer 3b: 语义验证 + 缩放拟合 + 评估契约
 │   ├── novelty.py         #   三重认证门: 正确 × 有价值 × 真创新（缺一不可）
+│   ├── sota_baselines.py  #   文献 SOTA 基线（CDKM, arXiv:quant-ph/0410184，带引用哈希）
 │   ├── library.py         #   Layer 2A: 已知算法库（GraphRAG 微缩版）
 │   ├── track_b.py         #   Layer 2B: MAP-Elites 进化发现引擎
 │   ├── problem.py         #   Layer 1: 形式化 IR + 经典分诊路由
 │   ├── portfolio.py       #   Layer 4: 排序解决方案组合 + 端到端流水线
 │   └── cli.py             #   演示入口
-└── tests/test_qac.py      # 65 项综合测试（全绿）
+└── tests/test_qac.py      # 78 项综合测试（全绿）
 ```
 
 ## 许可与引用

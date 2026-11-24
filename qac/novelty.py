@@ -128,7 +128,10 @@ def certify_innovation(
 
     `report` is the Layer-3 VerificationReport (correctness on the campaign
     sizes); `baseline_candidates` defaults to every known-library candidate
-    sharing the candidate's spec.
+    PLUS the cited literature SOTA baselines (qac/sota_baselines.py — CDKM /
+    Cuccaro arXiv:quant-ph/0410184), all filtered to those sharing the
+    candidate's spec. A certificate is therefore earned against the published
+    state of the art, not merely against this repo's own library.
     """
     cert = InnovationCertificate(candidate_id=candidate.id)
     reasons: list[str] = []
@@ -158,9 +161,13 @@ def certify_innovation(
     # ---- collect same-spec baselines --------------------------------------
     if baseline_candidates is None:
         from .library import KnownAlgorithmLibrary
+        from .sota_baselines import sota_baselines
 
         lib = KnownAlgorithmLibrary()
-        baseline_candidates = list(lib._entries.values())
+        # Library first, then literature SOTA: ordering only matters for the
+        # duplicate_verdict string (first same-unitary match wins), and the
+        # library entry is the canonical name a re-derivation should report.
+        baseline_candidates = list(lib._entries.values()) + sota_baselines()
     same_spec_baselines = [b for b in baseline_candidates if _same_spec(candidate, b)]
     cert.baselines_compared = [b.id for b in same_spec_baselines]
 

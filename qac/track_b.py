@@ -65,6 +65,53 @@ def _lean_interleaved_increment(n: int) -> Circuit:
     return c
 
 
+def _topwrite_increment(n: int) -> Circuit:
+    """INVENTED: "top-write" incrementer — strictly Pareto-dominates the lean
+    interleaved incrementer on ALL FOUR axes (width, Toffoli, gates, depth).
+
+    Key idea: the previous best design materializes the top carry
+    A_{n-1} = AND(b_0..b_{n-2}) in a slot only to apply it with a CNOT and
+    uncompute it immediately — but A_{n-1} is never an input to any higher
+    carry, and the top data bit b_{n-1} is never read again after its flip.
+    So the top carry is applied IN PLACE as a single gate:
+        Toffoli(s_{n-2}, b_{n-2}, b_{n-1})   # b_{n-1} ^= A_{n-1}
+    eliminating the top slot AND its apply-CNOT AND its uncompute-Toffoli.
+    The rest is the same interleaved prefix-AND schedule, one level shorter.
+
+    Machine-verified n=1..8 (exhaustive semantics + ancilla-clean):
+      width   2n-3   vs lean 2n-2  (one fewer qubit),
+      toffoli 2n-5   vs lean 2n-4  (one fewer Toffoli),
+      gates/depth 3n-6 vs lean 3n-4 (two fewer each).
+    Honest scope: the formulas hold for n>=3; at n=1..2 the base cases coincide
+    with the lean construction by design, so the strict-dominance claim vs lean
+    is scoped to n>=3. Against the gate's actual baselines (known:increment-
+    ancilla, sota:cdkm-increment) it is <= on all axes with a strict win on
+    every axis at every checked size n=2..6.
+    """
+    if n == 1:
+        return Circuit(1, [X(0)])
+    if n == 2:
+        return Circuit(2, [CNOT(0, 1), X(0)])
+    if n == 3:
+        # No slot survives: the only carry A_2 = b_0&b_1 goes straight into b_2.
+        return Circuit(3, [Toffoli(0, 1, 2), CNOT(0, 1), X(0)])
+    total = 2 * n - 3
+    c = Circuit(total)
+    slot = lambda i: n + i - 2  # slot for A_i, i = 2..n-2 (n-3 slots)
+    c.gates.append(Toffoli(0, 1, slot(2)))  # A_2 = b_0 & b_1
+    for i in range(3, n - 1):  # A_i = A_{i-1} & b_{i-1}, up to A_{n-2}
+        c.gates.append(Toffoli(slot(i - 1), i - 1, slot(i)))
+    c.gates.append(Toffoli(slot(n - 2), n - 2, n - 1))  # TOP-WRITE: b_{n-1} ^= A_{n-1}
+    for i in range(n - 2, 2, -1):  # top-down apply + uncompute
+        c.gates.append(CNOT(slot(i), i))
+        c.gates.append(Toffoli(slot(i - 1), i - 1, slot(i)))
+    c.gates.append(CNOT(slot(2), 2))  # b_2 ^= A_2
+    c.gates.append(Toffoli(0, 1, slot(2)))  # uncompute A_2
+    c.gates.append(CNOT(0, 1))  # b_1 ^= A_1 = b_0
+    c.gates.append(X(0))  # b_0 ^= 1 LAST
+    return c
+
+
 def _zigzag_increment(n: int) -> Circuit:
     """Mutation A: ancilla-free zig-zag (CNOT/X layers) — plausible family
     member; the sandbox decides. (Negative control: gets rejected.)"""
@@ -110,6 +157,7 @@ def _inplace_lookahead_increment(n: int) -> Circuit:
 
 GENERATOR_POOL = [
     _lean_interleaved_increment,
+    _topwrite_increment,
     _zigzag_increment,
     _cyclic_increment,
     _inplace_lookahead_increment,
