@@ -10,7 +10,6 @@ decides Track A (known algorithm), Track B (invent), or both in parallel
 
 from __future__ import annotations
 
-import math
 from dataclasses import dataclass, field
 from enum import Enum
 
@@ -51,7 +50,7 @@ def triage(ir: ProblemIR, quantum_speedup_poly: int | None = None) -> TriageRepo
     """Apply the triage gate.
 
     Rules (reduced but faithful):
-      1. QRAM data loading with only quadratic speedup -> reject (never wins).
+      1. One-off QRAM load with only quadratic speedup -> reject.
       2. No known template -> Track B necessity mode.
       3. Known template but resource bottleneck flagged -> Track B opportunity
          alongside Track A (one problem, many solutions).
@@ -61,8 +60,8 @@ def triage(ir: ProblemIR, quantum_speedup_poly: int | None = None) -> TriageRepo
     quadratic_only = quantum_speedup_poly == 2
     if ir.data_loading == "qram" and quadratic_only:
         reasons.append(
-            "QRAM load cost is O(N); a quadratic Grover speedup cannot overcome "
-            "it plus error-correction overhead — classical wins."
+            "Under the one-off O(N) loading model, a quadratic query speedup "
+            "does not yield a sublinear end-to-end algorithm."
         )
         return TriageReport(False, False, None, reasons)
 
@@ -73,7 +72,7 @@ def triage(ir: ProblemIR, quantum_speedup_poly: int | None = None) -> TriageRepo
     if ir.notes.get("resource_bottleneck"):
         reasons.append(
             f"Known template '{ir.known_template}' has a flagged bottleneck: "
-            "opportunity mode — run Track B in parallel for a portfolio."
+            "search for improved implementations alongside the known circuit."
         )
         return TriageReport(True, True, "opportunity", reasons)
 

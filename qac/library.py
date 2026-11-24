@@ -37,6 +37,13 @@ class Candidate:
     def ancilla(self, n):
         return self._ancilla(n)
 
+    def implementation(self, id: str, track: str, build_fn) -> Candidate:
+        """Bind another circuit generator to this problem's specification and layout."""
+        def ancillas(n: int) -> list[int]:
+            return list(range(self.n_data(n), build_fn(n).n))
+
+        return Candidate(id, track, build_fn, self.spec, self.n_data, ancillas)
+
 
 # ---------------------------------------------------------------------------
 # Known incrementer constructions
@@ -270,8 +277,8 @@ def build_prefixxor_ladder_reference(n: int) -> Circuit:
     """Textbook prefix-XOR (running parity) via a serial CNOT ladder.
 
     Bottom-up b_i ^= b_{i-1}: after the cascade bit i holds the running
-    parity P_i = b_0 ^ ... ^ b_i. The prefix map is an involution over
-    GF(2), so the ladder is its own inverse. Real-world role: QEC
+    parity P_i = b_0 ^ ... ^ b_i. Reversing the gates takes adjacent
+    differences and recovers the original bits. Real-world role: QEC
     syndrome parity checks and checksum/hash layers inside oracles.
 
     n-1 CNOTs, depth n-1, 0 Toffolis, 0 ancillas.
@@ -310,7 +317,7 @@ def prefixxor_candidate_ladder() -> Candidate:
 # ---------------------------------------------------------------------------
 
 def lessthan_k(n: int) -> int:
-    """Threshold constant: k = min(n+1, 2^(n-1) - 1) (fits the value bits)."""
+    """Threshold constant k = min(n+1, 2^(n-1) - 1)."""
     m = n - 1
     return min(n + 1, (1 << m) - 1)
 
@@ -789,14 +796,11 @@ class KnownAlgorithmLibrary:
     def has(self, problem_key: str) -> bool:
         return problem_key in self._entries
 
+    def candidates(self) -> tuple[Candidate, ...]:
+        return tuple(self._entries.values())
+
     def verify_all(self, sizes=(3, 4, 5)) -> dict[str, VerificationReport]:
-        """Sweep every entry through the sandbox. The width rail is budgeted
-        per entry from its own peak width at the largest size (families with
-        wider working registers, e.g. weighted_threshold, verify at the
-        width they actually need); semantics, ancilla-cleanliness, and the
-        polynomial scaling fit still bound every entry."""
-        out: dict[str, VerificationReport] = {}
-        for k, c in self._entries.items():
-            peak = c.build(max(sizes)).n
-            out[k] = evaluate_candidate(c, sizes=sizes, max_total_width=max(12, peak))
-        return out
+        """Sweep every entry through the same finite verification limits."""
+        sizes = tuple(sizes)
+        return {key: evaluate_candidate(candidate, sizes=sizes)
+                for key, candidate in self._entries.items()}

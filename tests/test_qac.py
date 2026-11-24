@@ -369,10 +369,7 @@ class TestSotaBaselines:
             assert build_cuccaro_increment(n).gate_count() == 6 * n + 2
             assert build_cuccaro_increment(n).depth() == 5 * n + 2
 
-    def test_cuccaro_incrementer_is_honest_floor_not_strawman(self):
-        # The CDKM-derived incrementer must be strictly WORSE than the repo's
-        # known incrementer on every axis — otherwise this baseline would be
-        # a strawman and the innovation gate would be too lax.
+    def test_cuccaro_constant_register_costs_more_than_a_specialized_incrementer(self):
         for n in (3, 4, 5, 6):
             sota = build_cuccaro_increment(n)
             known = build_increment_ancilla_reference(n)
@@ -398,18 +395,14 @@ class TestSotaBaselines:
             assert isinstance(cand.spec(5), dict)
 
     def test_innovation_gate_defaults_include_sota_baselines(self):
-        # The gate's DEFAULT baseline list must include the cited literature
-        # SOTA constructions alongside the in-repo library: a certificate is
-        # earned against the published state of the art, not just ourselves.
-        # (Discovery/portfolio inherit this via certify_innovation defaults.)
         cand = generator_to_candidate(_lean_interleaved_increment)
         rep = evaluate_candidate(cand, sizes=(3, 4, 5))
         cert = certify_innovation(cand, report=rep)
         assert "known:increment-ancilla" in cert.baselines_compared
         assert "sota:cdkm-increment" in cert.baselines_compared
         assert "sota:cdkm-increment" in cert.dominated_baselines
-        assert cert.certified, cert.reasons
-        assert "width" in cert.pareto_strict_axes
+        assert "reference:shared-prefix-increment" in cert.baselines_compared
+        assert cert.correct and not cert.certified
 
     def test_sota_same_spec_map_and_dominance_receipts(self):
         # Machine-checked same-spec map (novelty._same_spec, not hand-assigned):
@@ -479,8 +472,8 @@ class TestDiscovery:
         for gen in (_zigzag_increment, _cyclic_increment, _inplace_lookahead_increment):
             assert not check_semantics(gen(5), increment_spec(5), 5).ok
 
-    def test_necessity_mode_succeeds_with_inventions(self):
-        res = run_discovery(sizes=(3, 4, 5), mode="necessity", seed=0, max_batches=2)
+    def test_necessity_mode_succeeds_with_optimizations(self):
+        res = run_discovery(problem_key="less_than", mode="necessity", seed=0, max_batches=5)
         assert res.attempts >= 1
         assert res.succeeded
         assert len(res.invented) >= 1
@@ -488,10 +481,10 @@ class TestDiscovery:
             assert e.report.passed
 
     def test_opportunity_mode_requires_pareto_vs_baseline(self):
-        res = run_discovery(sizes=(3, 4, 5), mode="opportunity", seed=0, max_batches=2)
-        assert res.succeeded, "lean incrementer must Pareto-dominate the ancilla reference"
-        best = res.invented[0]
-        assert best.width_max < 2 * 5 - 1  # narrower than library's 9 qubits
+        res = run_discovery(problem_key="less_than", mode="opportunity", seed=0, max_batches=5)
+        assert res.succeeded
+        best = res.certified[0].certificate
+        assert best.valuable and "known:lessthan-borrow" in best.dominated_baselines
 
     def test_budget_boxing_limits_attempts(self):
         res = run_discovery(sizes=(3, 4, 5), max_batches=1, mode="necessity", seed=0)
@@ -525,26 +518,26 @@ class TestDiscovery:
 # ===========================================================================
 
 class TestEndToEnd:
-    def test_necessity_run_delivers_invented_portfolio(self):
-        ir = ProblemIR(IRKind.ARITHMETIC, known_template=None)
-        res = run_agent("reversible incrementer", ir, sizes=(3, 4, 5), seed=7)
+    def test_necessity_run_delivers_optimized_portfolio(self):
+        ir = ProblemIR(IRKind.ARITHMETIC, notes={"library_key": "less_than"})
+        res = run_agent("coherent comparison", ir, sizes=(3, 4, 5), seed=7)
         assert res.delivered
-        assert all(e.provenance == "invented" for e in res.portfolio)
+        assert all(e.provenance == "optimized" for e in res.portfolio)
         assert res.triage.track_b_mode == "necessity"
 
     def test_opportunity_run_mixed_portfolio(self):
         ir = ProblemIR(
-            IRKind.ARITHMETIC, known_template="increment",
-            notes={"library_key": "increment", "resource_bottleneck": True},
+            IRKind.ARITHMETIC, known_template="less_than",
+            notes={"library_key": "less_than", "resource_bottleneck": True},
         )
-        res = run_agent("incrementer with bottleneck", ir, sizes=(3, 4, 5), seed=7)
+        res = run_agent("comparison with bottleneck", ir, sizes=(3, 4, 5), seed=7)
         assert res.delivered
         provs = {e.provenance for e in res.portfolio}
-        assert "known" in provs and "invented" in provs  # one problem, many solutions
+        assert "known" in provs and "optimized" in provs  # one problem, many solutions
 
     def test_known_only_run(self):
-        ir = ProblemIR(IRKind.LINEAR_SYSTEM, known_template="hhl", notes={"library_key": "increment"})
-        res = run_agent("linear solve", ir, sizes=(3, 4, 5))
+        ir = ProblemIR(IRKind.ARITHMETIC, known_template="bit_reversal")
+        res = run_agent("bit reversal", ir, sizes=(3, 4, 5))
         assert res.delivered
         assert all(e.provenance == "known" for e in res.portfolio)
         assert res.triage.track_b_mode is None
@@ -554,42 +547,43 @@ class TestEndToEnd:
         res = run_agent("search", ir, sizes=(3,), quantum_speedup_poly=2)
         assert not res.delivered
         assert not res.triage.recommend_quantum
-        assert res.notes
+        assert res.triage.reasons
 
     def test_portfolio_is_ranked_by_resources(self):
         ir = ProblemIR(
-            IRKind.ARITHMETIC, known_template="increment",
-            notes={"library_key": "increment", "resource_bottleneck": True},
+            IRKind.ARITHMETIC, known_template="less_than",
+            notes={"library_key": "less_than", "resource_bottleneck": True},
         )
         res = run_agent("rank check", ir, sizes=(3, 4, 5), seed=7)
         scores = [e.score for e in res.portfolio]
         assert scores == sorted(scores)
 
     def test_full_pipeline_deterministic(self):
-        ir = ProblemIR(IRKind.ARITHMETIC, known_template=None)
+        ir = ProblemIR(IRKind.ARITHMETIC, notes={"library_key": "less_than"})
         a = run_agent("det", ir, sizes=(3, 4, 5), seed=7)
         b = run_agent("det", ir, sizes=(3, 4, 5), seed=7)
         assert [e.candidate_id for e in a.portfolio] == [e.candidate_id for e in b.portfolio]
+        assert a.discovery.lineage == b.discovery.lineage
 
     def test_every_delivered_entry_passed_the_sandbox(self):
         ir = ProblemIR(
-            IRKind.ARITHMETIC, known_template="increment",
-            notes={"library_key": "increment", "resource_bottleneck": True},
+            IRKind.ARITHMETIC, known_template="less_than",
+            notes={"library_key": "less_than", "resource_bottleneck": True},
         )
         res = run_agent("verify all", ir, sizes=(3, 4, 5), seed=7)
         for e in res.portfolio:
             assert e.report.passed
             assert all(e.report.correctness.values())
 
-    def test_invented_beats_known_in_portfolio(self):
-        """The design's promise: opportunity mode yields a Pareto-better invention."""
+    def test_optimized_comparator_beats_known_in_portfolio(self):
+        """Optimization preserves the comparator contract and improves its resources."""
         ir = ProblemIR(
-            IRKind.ARITHMETIC, known_template="increment",
-            notes={"library_key": "increment", "resource_bottleneck": True},
+            IRKind.ARITHMETIC, known_template="less_than",
+            notes={"library_key": "less_than", "resource_bottleneck": True},
         )
         res = run_agent("invention value", ir, sizes=(3, 4, 5), seed=7)
         known = [e for e in res.portfolio if e.provenance == "known"]
-        invented = [e for e in res.portfolio if e.provenance == "invented"]
+        invented = [e for e in res.portfolio if e.provenance == "optimized"]
         assert known and invented
         k, v = known[0], invented[0]
         m = k.report.sizes[-1]
@@ -637,8 +631,7 @@ class TestDesignInvariants:
 # ===========================================================================
 
 class TestInnovationCertificate:
-    """Positive control: the lean interleaved incrementer passes all three
-    gates; each negative control fails exactly the gate it violates."""
+    """Certificates are relative to the declared set of reference circuits."""
 
     def _certify(self, gen, **kw):
         cand = generator_to_candidate(gen)
@@ -646,7 +639,7 @@ class TestInnovationCertificate:
         return cand, rep, certify_innovation(cand, report=rep, **kw)
 
     def test_positive_control_triple_certified(self):
-        _, _, cert = self._certify(_lean_interleaved_increment)
+        _, _, cert = self._certify(_lean_interleaved_increment, baseline_candidates=[_inc_cand()])
         assert cert.correct, cert.reasons
         assert cert.valuable, cert.reasons
         assert cert.novel, cert.reasons
@@ -656,8 +649,6 @@ class TestInnovationCertificate:
         assert "known:increment-ancilla" in cert.dominated_baselines
 
     def test_duplicate_of_known_is_not_novel(self):
-        # Correct AND (weakly) valuable — but it IS the library circuit:
-        # novelty gate must reject it as a re-derivation.
         _, _, cert = self._certify(build_increment_ancilla_reference)
         assert cert.correct
         assert not cert.novel
@@ -705,19 +696,19 @@ class TestInnovationCertificate:
         assert set((2, 3, 4, 5, 6)).issubset(set(cert.extended_sizes))
 
     def test_discovery_result_exposes_certified_subset(self):
-        res = run_discovery(sizes=(3, 4, 5), mode="opportunity", seed=0, max_batches=2)
+        res = run_discovery(problem_key="less_than", mode="opportunity", seed=0, max_batches=5)
         assert res.certified
         for e in res.certified:
             assert e.certificate is not None and e.certificate.certified
             assert e.candidate.id in res.certificates
 
-    def test_portfolio_inventions_are_all_triple_certified(self):
+    def test_portfolio_optimizations_are_all_triple_certified(self):
         ir = ProblemIR(
-            IRKind.ARITHMETIC, known_template="increment",
-            notes={"library_key": "increment", "resource_bottleneck": True},
+            IRKind.ARITHMETIC, known_template="less_than",
+            notes={"resource_bottleneck": True},
         )
         res = run_agent("triple gate", ir, sizes=(3, 4, 5), seed=7)
-        invented = [e for e in res.portfolio if e.provenance == "invented"]
+        invented = [e for e in res.portfolio if e.provenance == "optimized"]
         assert invented, "certified invention must still be delivered"
         for e in invented:
             assert e.certificate is not None
@@ -725,18 +716,11 @@ class TestInnovationCertificate:
             assert e.certificate.correct and e.certificate.valuable and e.certificate.novel
 
     def test_uncertified_never_reaches_portfolio(self):
-        # A mutator whose only proposal is a re-derivation of the known
-        # circuit: sandbox-correct, but the portfolio must stay clean.
-        class _DupMutator:
-            def propose(self, trace=None, batch_size=2):
-                return [build_increment_ancilla_reference]
-
-        ir = ProblemIR(IRKind.ARITHMETIC, known_template=None)  # necessity mode
+        ir = ProblemIR(IRKind.ARITHMETIC, notes={"library_key": "increment"})
         res = run_agent(
             "duplicate mutator", ir, sizes=(3, 4, 5),
             track_b_budget=1,
         )
-        # run_agent uses MutatorStandIn; exercise the gate directly instead:
         discovery = run_discovery(
             mutator=MutatorStandIn(pool=[build_increment_ancilla_reference]),
             sizes=(3, 4, 5), mode="necessity", max_batches=1,
@@ -744,24 +728,22 @@ class TestInnovationCertificate:
         assert discovery.attempts == 1
         assert not discovery.certified, "a duplicate of a known algorithm is not an invention"
         assert any("UNCERTIFIED" in t or "FAIL" in t for t in discovery.trace)
-        assert res.delivered  # sanity: the normal pipeline still delivers
+        assert res.delivered
+        assert all(entry.provenance == "known" for entry in res.portfolio)
 
     def test_certificate_json_serializable(self):
         import json
 
-        _, _, cert = self._certify(_lean_interleaved_increment)
+        _, _, cert = self._certify(_lean_interleaved_increment, baseline_candidates=[_inc_cand()])
         blob = json.dumps(cert.to_dict())
         assert '"certified": true' in blob
 
 
 # ===========================================================================
-# The certified invention: top-write incrementer (search-campaign deliverable)
+# Historical top-write incrementer audit
 # ===========================================================================
 
-class TestTopwriteInvention:
-    """Locks the machine-certified invention: correct x valuable x novel vs
-    the full honest baseline pool (12 library families + 3 cited SOTA
-    constructions), Pareto-strict on ALL FOUR axes."""
+class TestTopwriteAudit:
 
     def test_exhaustive_semantics_n1_to_8(self):
         for n in range(1, 9):
@@ -782,22 +764,20 @@ class TestTopwriteInvention:
             for axis in ("width", "toffoli", "gates", "depth"):
                 assert tw[axis] < ln[axis], (n, axis, tw, ln)
 
-    def test_triple_certified_all_four_axes_strict(self):
+    def test_matches_shared_prefix_and_beats_original_baselines(self):
         cand = generator_to_candidate(_topwrite_increment)
         rep = evaluate_candidate(cand, sizes=(3, 4, 5))
         assert rep.passed
         cert = certify_innovation(cand, report=rep)
-        assert cert.certified, cert.reasons
-        assert cert.correct and cert.valuable and cert.novel
-        assert cert.novelty_verdict == "distinct"
-        assert cert.pareto_strict_axes == ["depth", "gates", "toffoli", "width"]
+        assert cert.correct and not cert.certified
+        assert not cert.valuable and not cert.novel
+        assert cert.novelty_verdict == "duplicate_of:reference:shared-prefix-increment"
         assert cert.dominated_baselines == [
             "known:increment-ancilla", "sota:cdkm-increment",
         ]
 
-    def test_discovery_campaign_certifies_it(self):
+    def test_historical_replay_does_not_certify_it(self):
         for mode in ("necessity", "opportunity"):
             res = run_discovery(sizes=(3, 4, 5), mode=mode, seed=0, max_batches=2)
-            ids = {e.candidate.id for e in res.certified}
-            assert "invented:topwrite_increment" in ids, (mode, ids)
-            assert res.succeeded
+            assert res.certificates["invented:topwrite_increment"].correct
+            assert not res.succeeded

@@ -1,5 +1,4 @@
-"""Literature SOTA baselines: the state of the art that any Track-B
-"innovation" must actually beat before the certificate may say "valuable".
+"""Cited and problem-specialized comparison implementations.
 
 Source (single citation for this module):
   Cuccaro, Draper, Kutin, Moulton, "A new quantum ripple-carry addition
@@ -11,26 +10,19 @@ Source (single citation for this module):
       MAJ(x,y,z) = CX(x,y), CX(x,z), CCX(z,y,x)
       UMA(x,y,z) = CCX(z,y,x), CX(x,z), CX(z,y)
 
-Every construction below is exhaustively machine-verified by the sandbox
-(check_semantics, all 2^data_n inputs, ancilla-clean, amplitude +1) at
-n = 1..6 — see tests/test_qac.py::test_sota_baselines_verified.
-
-Citation SHA-256 (canonical string in CUCCARO_CITATION):
-  4a84cc18822acd28fd0b4a86c9ea656a3cfea0ef6442a7546c97b3e95efe4d5f
-
-Honest scope note (paper section 5): the CDKM adder does NOT simplify
-when one addend is a classical constant — a constant addend still needs
-a quantum register. The incrementer / const-adder baselines therefore
-pay the full adder price (width 2n+1, Toffoli 2n), which is what makes
-them an honest literature floor rather than a strawman.
+The CDKM increment and constant-add entries instantiate a general adder
+with a prepared constant register. The shared-prefix reference below
+specializes the circuit to the increment problem itself.
 """
 
 from __future__ import annotations
 
 import hashlib
 
+from .arithmetic import SumProgram, build_sum_threshold, compact_circuit, controlled_increment
 from .kickmix import CNOT, Circuit, Toffoli, X
-from .library import Candidate, addconst_k, addconst_spec, increment_spec
+from .library import Candidate, KnownAlgorithmLibrary, addconst_k, addconst_spec, increment_spec
+from .library import majority_K, weighted_theta
 
 CUCCARO_CITATION = (
     "Cuccaro, Draper, Kutin, Moulton: A new quantum ripple-carry addition "
@@ -49,7 +41,7 @@ def _maj(x: int, y: int, z: int) -> list:
 
 
 def _uma(x: int, y: int, z: int) -> list:
-    """CDKM 'UnMajority and Add' gate (paper Fig. 2, 3-CNOT version)."""
+    """CDKM 'UnMajority and Add' gate (two CNOTs and one Toffoli)."""
     return [Toffoli(z, y, x), CNOT(x, z), CNOT(z, y)]
 
 
@@ -77,8 +69,7 @@ def build_cuccaro_mod_adder(n: int) -> Circuit:
 def build_cuccaro_increment(n: int) -> Circuit:
     """Incrementer as the CDKM adder with constant addend a = 1.
 
-    Paper section 5: no simplification for constant addends — the full
-    adder price is paid. Layout: data b[i] = i, addend register
+    Layout: data b[i] = i, addend register
     a[i] = n + i (X-set to 1, then uncomputed), helper = 2n.
     Data width n, ancillas n + 1, total width 2n + 1.
 
@@ -171,9 +162,40 @@ def cuccaro_addconst_candidate() -> Candidate:
 
 
 def sota_baselines() -> list[Candidate]:
-    """All literature SOTA baselines (the honest 'valuable' floor)."""
+    """Retain the original CDKM benchmark IDs for reproducible comparisons."""
     return [
         cuccaro_mod_adder_candidate(),
         cuccaro_increment_candidate(),
         cuccaro_addconst_candidate(),
     ]
+
+
+def build_shared_prefix_increment(n: int) -> Circuit:
+    """The descending controlled-X ladder with shared clean AND prefixes.
+
+    A bit flips exactly when all lower bits are one. Write the longest
+    conjunction directly into the high bit, then apply and erase each
+    shorter AND prefix while the lower data bits are still unmodified.
+    """
+    gates = controlled_increment(0, tuple(range(1, n)), n, fuse=True)
+    return compact_circuit(n, gates + [X(0)])
+
+
+def specialized_baselines(library: KnownAlgorithmLibrary) -> dict[str, Candidate]:
+    """Same-contract references with the main textbook inefficiencies removed."""
+    fixed_width = SumProgram(fuse=True)
+
+    def fixed_width_majority(n: int) -> Circuit:
+        return build_sum_threshold((1,) * n, majority_K(n), fixed_width)
+
+    def fixed_width_weighted(n: int) -> Circuit:
+        return build_sum_threshold(tuple(range(1, n + 1)), weighted_theta(n), fixed_width)
+
+    return {
+        "increment": library.synthesize("increment", 1).implementation(
+            "reference:shared-prefix-increment", "A", build_shared_prefix_increment),
+        "majority": library.synthesize("majority", 1).implementation(
+            "reference:fixed-width-majority", "A", fixed_width_majority),
+        "weighted_threshold": library.synthesize("weighted_threshold", 1).implementation(
+            "reference:fixed-width-weighted", "A", fixed_width_weighted),
+    }

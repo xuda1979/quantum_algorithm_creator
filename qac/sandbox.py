@@ -1,22 +1,25 @@
-"""Layer 3 (part 2): multi-fidelity verification & resource sandbox.
-
-The strict evaluation contract every candidate (Track A or Track B) must
-pass through (AGENT_DESIGN.md Phase 1): typed reports with pass/fail flags,
-exact resource counts, and fitted scaling — deterministic and sub-second.
-
-Verification is SEMANTIC (ground truth), not reference-vs-reference: for
-every input x the statevector of V|x>|0^a> must be exactly |spec(x)>|0^a>
-with amplitude +1 — this simultaneously checks function correctness, clean
-ancilla uncomputation, and absence of stray phases (Maker-Checker).
-"""
+"""Exhaustive basis semantics, clean ancillas, and logical resource counts."""
 
 from __future__ import annotations
 
 import math
 import time
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field, asdict
 
-from .kickmix import Circuit, KickmixSimulator, KickmixState
+from .kickmix import CCZ, CNOT, CZ, SWAP, Circuit, Toffoli, X, Z
+
+BasisSpec = Mapping[int, int] | Callable[[int], int]
+PACKED_GATES = (X, CNOT, Toffoli, SWAP, Z, CZ, CCZ)
+MAX_DENSE_WIDTH = 14
+MAX_EXHAUSTIVE_DATA_WIDTH = 14
+
+
+def verification_sizes(sizes) -> tuple[int, ...]:
+    sizes = tuple(sizes)
+    if not sizes or any(type(n) is not int or n < 1 for n in sizes):
+        raise ValueError("verification requires one or more positive integer sizes")
+    return tuple(sorted(set(sizes)))
 
 
 # --------------------------------------------------------------------------
@@ -25,6 +28,9 @@ from .kickmix import Circuit, KickmixSimulator, KickmixState
 
 def run_statevector(circuit: Circuit) -> list[complex]:
     """Apply circuit to |0...0> and return the exact statevector (len 2^n)."""
+    circuit.validate()
+    if circuit.n > MAX_DENSE_WIDTH:
+        raise ValueError(f"width {circuit.n} exceeds statevector limit {MAX_DENSE_WIDTH}")
     psi = [0j] * (1 << circuit.n)
     psi[0] = 1.0 + 0j
     for g in circuit.gates:
@@ -33,7 +39,10 @@ def run_statevector(circuit: Circuit) -> list[complex]:
 
 
 def unitary_matrix(circuit: Circuit) -> list[list[complex]]:
-    """Full 2^n x 2^n unitary by applying to each basis state (n <= 7)."""
+    """Full 2^n x 2^n unitary by applying to each basis state (n <= 8)."""
+    circuit.validate()
+    if circuit.n > 8:
+        raise ValueError("full unitary is limited to eight qubits")
     dim = 1 << circuit.n
     cols = []
     for col in range(dim):
@@ -47,7 +56,8 @@ def unitary_matrix(circuit: Circuit) -> list[list[complex]]:
 
 def fidelity(circuit_a: Circuit, circuit_b: Circuit) -> float:
     """F = |Tr(U_a^dag U_b)| / 2^n for equal-width circuits."""
-    assert circuit_a.n == circuit_b.n, "fidelity requires equal widths"
+    if circuit_a.n != circuit_b.n:
+        raise ValueError("fidelity requires equal widths")
     ua, ub = unitary_matrix(circuit_a), unitary_matrix(circuit_b)
     dim = 1 << circuit_a.n
     tr = sum(
@@ -76,9 +86,12 @@ def check_ancilla_clean(
     """circuit_builder(n) -> Circuit over n data + len(ancilla) ancilla qubits.
     Verifies every ancilla returns to |0> for every computational input x."""
     total = n + len(ancilla)
-    assert total <= max_n + 4
+    if total > max_n + 4 or sorted(ancilla) != list(range(n, total)):
+        raise ValueError("expected low data wires followed by clean ancilla wires within the width limit")
     circuit = circuit_builder(n)
-    assert circuit.n == total, f"circuit width {circuit.n} != {total}"
+    circuit.validate()
+    if circuit.n != total:
+        raise ValueError(f"circuit width {circuit.n} != {total}")
     bad_idx, bad_in = set(), []
     for x in range(1 << n):
         psi = [0j] * (1 << total)
@@ -104,16 +117,24 @@ def check_ancilla_clean(
 class SemanticReport:
     ok: bool
     reasons: list = field(default_factory=list)
+    ancilla_clean: bool = False
 
 
 def check_semantics(
     circuit: Circuit,
-    spec: dict[int, int] | callable,
+    spec: BasisSpec,
     data_n: int,
     eps: float = 1e-9,
 ) -> SemanticReport:
     """Exhaustive check over all 2^data_n inputs on the exact statevector."""
+    circuit.validate()
+    if type(data_n) is not int or not 0 <= data_n <= circuit.n <= MAX_DENSE_WIDTH:
+        raise ValueError("statevector check exceeds its supported data or circuit width")
+    if not math.isfinite(eps) or eps <= 0:
+        raise ValueError("statevector tolerance must be finite and positive")
+    outputs = expected_outputs(spec, data_n)
     reasons: list[str] = []
+    ancilla_clean = True
     total = circuit.n
     dim = 1 << total
     for x in range(1 << data_n):
@@ -121,33 +142,116 @@ def check_semantics(
         psi[x] = 1.0
         for g in circuit.gates:
             g.apply_statevector(psi, total)
-        support = [idx for idx, amp in enumerate(psi) if abs(amp) > eps]
+        support = []
+        for idx, amp in enumerate(psi):
+            magnitude = abs(amp)
+            if not math.isfinite(magnitude):
+                return SemanticReport(False, [f"x={x}: nonfinite output amplitude"])
+            if magnitude > eps:
+                support.append(idx)
+        dirty = any(idx >> data_n for idx in support)
+        ancilla_clean = ancilla_clean and not dirty
+        if len(reasons) >= 5:
+            if not ancilla_clean:
+                break
+            continue
         if len(support) != 1:
             reasons.append(
                 f"x={x}: {len(support)} amplitudes in output "
                 "(not a basis permutation — dirty ancilla or non-classical map)"
             )
-            if len(reasons) > 4:
-                break
             continue
         idx = support[0]
-        if (idx >> data_n) != 0:
+        if dirty:
             reasons.append(f"x={x}: ancilla bits nonzero in output (idx={idx:#b})")
-            if len(reasons) > 4:
-                break
             continue
-        y = spec[x] if isinstance(spec, dict) else spec(x)
+        y = outputs[x]
         if idx != y:
             reasons.append(f"x={x}: got {idx}, want {y}")
-            if len(reasons) > 4:
-                break
             continue
         if abs(psi[idx] - 1.0) > eps:
             reasons.append(f"x={x}: amplitude {psi[idx]} != +1 (stray phase)")
-            if len(reasons) > 4:
-                break
-    return SemanticReport(ok=not reasons, reasons=reasons)
+    return SemanticReport(ok=not reasons, reasons=reasons, ancilla_clean=ancilla_clean)
 
+
+def uses_packed_evaluator(circuit: Circuit) -> bool:
+    return all(type(gate) in PACKED_GATES for gate in circuit.gates)
+
+
+def _check_packed_semantics(circuit: Circuit, expected: tuple[int, ...], data_n: int) -> SemanticReport:
+    """Propagate every basis input in parallel, with one bit plane per wire.
+
+    Position x in each plane holds that wire's value on input x. A separate
+    plane tracks sign, giving an exact check of the clean-ancilla isometry.
+    This evaluates the gate algebra independently of the scalar Kickmix code.
+    """
+    inputs = 1 << data_n
+    wires = [0] * circuit.n
+    for q in range(data_n):
+        block = 1 << q
+        pattern = ((1 << block) - 1) << block
+        span = block * 2
+        while span < inputs:
+            pattern |= pattern << span
+            span *= 2
+        wires[q] = pattern
+
+    ones = (1 << inputs) - 1
+    phase = 0
+    for gate in circuit.gates:
+        operands = gate.targets()
+        kind = type(gate)
+        if kind in (Z, CZ, CCZ):
+            mask = wires[operands[0]]
+            for q in operands[1:]:
+                mask &= wires[q]
+            phase ^= mask
+        elif kind is SWAP:
+            a, b = operands
+            wires[a], wires[b] = wires[b], wires[a]
+        else:
+            mask = ones
+            for q in operands[:-1]:
+                mask &= wires[q]
+            wires[operands[-1]] ^= mask
+
+    expected_planes = [bytearray((inputs + 7) // 8) for _ in range(data_n)]
+    for x, y in enumerate(expected):
+        byte, bit = divmod(x, 8)
+        while y:
+            low = y & -y
+            expected_planes[low.bit_length() - 1][byte] |= 1 << bit
+            y ^= low
+
+    mismatch = phase
+    for q, plane in enumerate(expected_planes):
+        mismatch |= wires[q] ^ int.from_bytes(plane, "little")
+    for plane in wires[data_n:]:
+        mismatch |= plane
+
+    reasons = []
+    while mismatch and len(reasons) < 5:
+        low = mismatch & -mismatch
+        x = low.bit_length() - 1
+        y = sum(((plane >> x) & 1) << q for q, plane in enumerate(wires))
+        if y >> data_n:
+            reasons.append(f"x={x}: ancilla bits nonzero in output (idx={y:#b})")
+        elif y != expected[x]:
+            reasons.append(f"x={x}: got {y}, want {expected[x]}")
+        else:
+            reasons.append(f"x={x}: amplitude -1 != +1 (stray phase)")
+        mismatch ^= low
+    return SemanticReport(ok=not reasons, reasons=reasons, ancilla_clean=not any(wires[data_n:]))
+
+
+def expected_outputs(spec: BasisSpec, data_n: int) -> tuple[int, ...]:
+    if type(data_n) is not int or not 0 <= data_n <= MAX_EXHAUSTIVE_DATA_WIDTH:
+        raise ValueError(f"data width {data_n!r} exceeds the exhaustive verification limit")
+    size = 1 << data_n
+    outputs = tuple(spec[x] if isinstance(spec, Mapping) else spec(x) for x in range(size))
+    if any(type(y) is not int or not 0 <= y < size for y in outputs):
+        raise ValueError("specification output is outside the data register")
+    return outputs
 
 # --------------------------------------------------------------------------
 # Symbolic scaling-fit guardrail (design doc section 5, guardrail 1)
@@ -159,11 +263,11 @@ def fit_scaling(counts: dict[int, int]) -> dict:
     verdict 'exponential' (e.g. hidden O(2^n) blowup from brute-force
     unrolling) is penalized/rejected by the sandbox.
     """
-    ns = sorted(counts)
+    ns = sorted(n for n, count in counts.items() if count > 0)
     if len(ns) < 3:
         return {"poly_exp": None, "poly_r2": None, "expo_r2": None, "verdict": "insufficient_data"}
     ys = [float(counts[k]) for k in ns]
-    ln_y = [math.log(max(y, 1e-12)) for y in ys]
+    ln_y = [math.log(y) for y in ys]
 
     def linfit(xs, ys_):
         n_ = len(xs)
@@ -182,7 +286,13 @@ def fit_scaling(counts: dict[int, int]) -> dict:
     powfit = linfit(ln_ns, ln_y)  # ln y = k ln n + c  ->  y = C n^k
     linfit_exp = linfit(ns, ln_y)  # ln y = k n + c  ->  y = C e^{kn}
 
-    verdict = "polynomial" if powfit[0] >= linfit_exp[0] else "exponential"
+    if powfit[0] + 1e-9 >= linfit_exp[0]:
+        verdict = "polynomial"
+    elif (len(ns) >= 4 and linfit_exp[0] >= 0.995 and linfit_exp[0] - powfit[0] > 0.001
+          and linfit_exp[1] >= math.log(1.5)):
+        verdict = "exponential"
+    else:
+        verdict = "inconclusive"
     return {
         "poly_exp": round(powfit[1], 4) if powfit[1] else powfit[1],
         "poly_r2": round(powfit[0], 4),
@@ -208,6 +318,7 @@ class VerificationReport:
     gate_count: dict = field(default_factory=dict)
     depth: dict = field(default_factory=dict)
     peak_qubits: dict = field(default_factory=dict)
+    semantic_backend: dict = field(default_factory=dict)
     scaling: dict = field(default_factory=dict)
     wall_time_s: float = 0.0
     passed: bool = False
@@ -221,7 +332,7 @@ def evaluate_candidate(
     candidate,
     sizes=(3, 4, 5),
     require_poly: bool = True,
-    max_total_width: int = 12,
+    max_total_width: int = 128,
 ) -> VerificationReport:
     """Full Maker-Checker pass for a parameterized candidate.
 
@@ -236,25 +347,44 @@ def evaluate_candidate(
     rep = VerificationReport(candidate_id=candidate.id, track=candidate.track)
     reasons: list[str] = []
 
-    for n in sizes:
-        circuit = candidate.build(n)
-        data_n = candidate.n_data(n)
-        anc = candidate.ancilla(n)
-        if circuit.n != data_n + len(anc):
-            reasons.append(
-                f"n={n}: width mismatch circuit={circuit.n} data+anc={data_n + len(anc)}"
-            )
-            continue
-        if circuit.n > max_total_width:
-            reasons.append(f"n={n}: width {circuit.n} exceeds sandbox limit {max_total_width}")
-            continue
+    try:
+        sizes = verification_sizes(sizes)
+    except ValueError as exc:
+        rep.failure_reasons = [str(exc)]
+        return rep
 
-        sem = check_semantics(circuit, candidate.spec(n), data_n)
-        anc_clean = all((idx >> data_n) == 0 for idx in _support(circuit, data_n)) if sem.ok else False
+    for n in sizes:
+        try:
+            circuit = candidate.build(n)
+            circuit.validate()
+            data_n = candidate.n_data(n)
+            anc = list(candidate.ancilla(n))
+            if type(data_n) is not int or not 0 <= data_n <= MAX_EXHAUSTIVE_DATA_WIDTH:
+                raise ValueError(f"data width {data_n!r} exceeds the exhaustive verification limit")
+            if circuit.n != data_n + len(anc):
+                raise ValueError(f"width mismatch circuit={circuit.n} data+anc={data_n + len(anc)}")
+            if any(type(q) is not int for q in anc) or sorted(anc) != list(range(data_n, circuit.n)):
+                raise ValueError("ancillas must be exactly the wires above the data register")
+            if circuit.n > max_total_width:
+                raise ValueError(f"width {circuit.n} exceeds sandbox limit {max_total_width}")
+            packed = uses_packed_evaluator(circuit)
+            if not packed and circuit.n > MAX_DENSE_WIDTH:
+                raise ValueError(f"width {circuit.n} exceeds statevector limit {MAX_DENSE_WIDTH}")
+
+            outputs = expected_outputs(candidate.spec(n), data_n)
+            if packed:
+                sem = _check_packed_semantics(circuit, outputs, data_n)
+                rep.semantic_backend[n] = "packed"
+            else:
+                sem = check_semantics(circuit, outputs.__getitem__, data_n)
+                rep.semantic_backend[n] = "statevector"
+        except Exception as exc:
+            reasons.append(f"n={n}: {type(exc).__name__}: {exc}")
+            continue
 
         rep.sizes.append(n)
         rep.correctness[n] = sem.ok
-        rep.ancilla_clean[n] = anc_clean
+        rep.ancilla_clean[n] = sem.ancilla_clean
         rep.toffoli[n] = circuit.toffoli_count()
         rep.gate_count[n] = circuit.gate_count()
         rep.depth[n] = circuit.depth()
@@ -263,11 +393,14 @@ def evaluate_candidate(
             reasons.append(f"n={n}: " + "; ".join(sem.reasons[:3]))
 
     if rep.sizes:
-        rep.scaling = fit_scaling(rep.toffoli)
-        if require_poly and rep.scaling.get("verdict") == "exponential":
-            reasons.append(f"scaling guardrail: exponential blowup detected {rep.scaling}")
-        if not all(rep.correctness[n] for n in rep.sizes):
-            pass  # already recorded per-size reasons above
+        rep.scaling = fit_scaling(rep.gate_count)
+        rep.scaling["width"] = fit_scaling(rep.peak_qubits)
+        rep.scaling["toffoli"] = fit_scaling(rep.toffoli)
+        if require_poly:
+            for metric, fit in (("gates", rep.scaling), ("width", rep.scaling["width"]),
+                                ("Toffolis", rep.scaling["toffoli"])):
+                if fit["verdict"] == "exponential":
+                    reasons.append(f"scaling guardrail: exponential {metric} growth suspected")
     else:
         reasons.append("no sizes evaluated")
 
@@ -275,17 +408,3 @@ def evaluate_candidate(
     rep.passed = not reasons
     rep.wall_time_s = round(time.perf_counter() - t0, 4)
     return rep
-
-
-def _support(circuit: Circuit, data_n: int) -> set[int]:
-    """Output data-bit patterns across all inputs (for ancilla summary)."""
-    out = set()
-    for x in range(1 << data_n):
-        psi = [0j] * (1 << circuit.n)
-        psi[x] = 1.0
-        for g in circuit.gates:
-            g.apply_statevector(psi, circuit.n)
-        for idx, amp in enumerate(psi):
-            if abs(amp) > 1e-9:
-                out.add(idx)
-    return out

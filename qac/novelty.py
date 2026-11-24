@@ -1,118 +1,84 @@
-"""Innovation certificate: the triple gate every Track-B candidate must pass
-before it may be labelled "invented" (AGENT_DESIGN.md Core Philosophy #5:
-"Machine-verified novelty only").
-
-A candidate counts as a genuine innovation if and only if ALL THREE hold:
-
-  1. CORRECT   — exact semantics on an extended size sweep (statevector,
-                 exhaustive over all inputs) plus an INDEPENDENT cross-check
-                 on the kickmix classical-reversible path (two evaluators,
-                 two code paths, same verdict). Ancilla cleanliness and
-                 polynomial scaling are inherited from the Layer-3 report.
-  2. VALUABLE  — strictly Pareto-dominates every same-spec baseline in the
-                 known library at EVERY verified size: <= resources in all
-                 tracked axes and STRICTLY BETTER in at least one. A candidate
-                 that merely matches a known algorithm delivers nothing.
-  3. NOVEL     — not identical to any same-spec known baseline, judged by
-                 gate-sequence fingerprint AND (for small sizes) exact
-                 unitary equality. If a "discovery" is bit-for-bit a library
-                 circuit, it is a re-derivation, not an invention — it is
-                 still deliverable as the known solution, but never as an
-                 innovation.
-"""
+"""Finite correctness, resource comparisons, and structural deduplication."""
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field, asdict
+from dataclasses import asdict, dataclass, field
 
-from .kickmix import allows_fast_path, Circuit, KickmixState
-from .sandbox import check_semantics, unitary_matrix
+from .kickmix import CCZ, CZ, SWAP, Circuit, KickmixState, Toffoli
+from .sandbox import check_semantics, evaluate_candidate, expected_outputs, verification_sizes
 
 
-def _resources(circuit: Circuit) -> dict:
-    return {
-        "width": circuit.n,
-        "toffoli": circuit.toffoli_count(),
-        "gates": circuit.gate_count(),
-        "depth": circuit.depth(),
-    }
+RESOURCE_AXES = ("width", "toffoli", "gates", "depth")
+
+
+def _resources(circuit: Circuit) -> dict[str, int]:
+    return dict(zip(RESOURCE_AXES, (circuit.n, circuit.toffoli_count(), circuit.gate_count(), circuit.depth())))
 
 
 def _fingerprint(circuit: Circuit) -> tuple:
-    """Structural identity of a circuit (gate sequence as tuples)."""
-    fp = []
-    for g in circuit.gates:
-        if hasattr(g, "c1"):  # Toffoli / CCZ
-            fp.append((g.name, g.c1, g.c2, g.t))
-        elif hasattr(g, "c"):  # CNOT / CZ
-            fp.append((g.name, g.c, g.t))
-        elif hasattr(g, "a"):  # SWAP
-            fp.append((g.name, g.a, g.b))
-        else:  # X / Z
-            fp.append((g.name, g.i))
-    return tuple(fp)
+    """Ignore ordering of disjoint gates and of symmetric controls."""
+    available = [0] * circuit.n
+    signature = []
+    for gate in circuit.gates:
+        wires = gate.targets()
+        depth = 1 + max((available[q] for q in wires), default=0)
+        for q in wires:
+            available[q] = depth
+        if isinstance(gate, Toffoli):
+            wires = (*sorted(wires[:-1]), wires[-1])
+        elif isinstance(gate, (CZ, CCZ, SWAP)):
+            wires = tuple(sorted(wires))
+        signature.append((depth, gate.name, wires))
+    return circuit.n, tuple(sorted(signature))
 
 
-def _unitaries_equal(a: Circuit, b: Circuit, eps: float = 1e-9) -> bool | None:
-    """Exact unitary equality when both circuits are small enough to compare
-    (equal width); None if not comparable (different widths / too large)."""
-    if a.n != b.n or a.n > 8:
-        return None
-    ua, ub = unitary_matrix(a), unitary_matrix(b)
-    dim = 1 << a.n
-    for r in range(dim):
-        for c in range(dim):
-            if abs(ua[r][c] - ub[r][c]) > eps:
-                return False
-    return True
-
-
-def _kickmix_check(circuit: Circuit, spec: dict[int, int], data_n: int) -> bool:
-    """Independent cross-check on the classical-reversible fast path:
-    run every input x through the kickmix simulator and compare against the
-    ground-truth spec. Only valid when the circuit allows the fast path."""
-    if not allows_fast_path(circuit):
-        return True  # not applicable; statevector check remains the sole judge
-    for x in range(1 << data_n):
-        st = KickmixState(n=circuit.n, x=x)
-        for g in circuit.gates:
-            g.apply_kickmix(st)
-        y = spec[x] if isinstance(spec, dict) else spec(x)
-        if st.x != y or st.phase != 0:
+def _kickmix_check(circuit: Circuit, outputs: tuple[int, ...]) -> bool:
+    for x, y in enumerate(outputs):
+        state = KickmixState(circuit.n, x)
+        for gate in circuit.gates:
+            gate.apply_kickmix(state)
+        if state.x != y or state.phase != 0:
             return False
     return True
 
 
 @dataclass
 class InnovationCertificate:
-    """Machine-checkable proof of genuine innovation (or its absence)."""
+    """Evidence about a circuit family relative to an explicit baseline set.
+
+    `novel` is the legacy field for structural distinctness within that set.
+    Correct implementations share the same clean-ancilla logical action.
+    """
 
     candidate_id: str
     correct: bool = False
     valuable: bool = False
     novel: bool = False
-    certified: bool = False  # all three — the only licence to say "invented"
-    extended_sizes: list = field(default_factory=list)
-    baselines_compared: list = field(default_factory=list)
-    pareto_strict_axes: list = field(default_factory=list)  # axes with strict wins
-    dominated_baselines: list = field(default_factory=list)
-    novelty_verdict: str = ""  # "distinct" | "duplicate_of:<id>"
-    reasons: list = field(default_factory=list)
+    certified: bool = False
+    extended_sizes: list[int] = field(default_factory=list)
+    kickmix_sizes: list[int] = field(default_factory=list)
+    statevector_sizes: list[int] = field(default_factory=list)
+    baselines_compared: list[str] = field(default_factory=list)
+    pareto_strict_axes: list[str] = field(default_factory=list)
+    dominated_baselines: list[str] = field(default_factory=list)
+    resources: dict[int, dict[str, int]] = field(default_factory=dict)
+    baseline_resources: dict[str, dict[int, dict[str, int]]] = field(default_factory=dict)
+    improved_sizes: dict[str, list[int]] = field(default_factory=dict)
+    novelty_verdict: str = "unverified"
+    literature_status: str = "unassessed"
+    reasons: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         return asdict(self)
 
 
-def _same_spec(candidate, baseline) -> bool:
-    """Two candidates solve the same problem iff their specs agree at every
-    comparable size (same data width AND same truth table)."""
-    for n in (3, 4, 5):
-        try:
-            if candidate.n_data(n) != baseline.n_data(n):
-                return False
-            if candidate.spec(n) != baseline.spec(n):
-                return False
-        except Exception:
+def _same_spec(candidate, baseline, sizes=(3, 4, 5)) -> bool:
+    """Check the declared contract for every size, including callable specs."""
+    for n in sizes:
+        data_n = candidate.n_data(n)
+        if data_n != baseline.n_data(n):
+            return False
+        if expected_outputs(candidate.spec(n), data_n) != expected_outputs(baseline.spec(n), data_n):
             return False
     return True
 
@@ -121,126 +87,121 @@ def certify_innovation(
     candidate,
     report=None,
     baseline_candidates: list | None = None,
-    extended_sizes=(2, 3, 4, 5, 6),
-    unitary_crosscheck_max_n: int = 5,
+    extended_sizes=(1, 2, 3, 4, 5, 6),
+    dense_crosscheck_max_width: int = 8,
 ) -> InnovationCertificate:
-    """Run the full triple gate on a sandbox-verified Track-B candidate.
+    """Check all declared sizes and require a measurable win over each baseline.
 
-    `report` is the Layer-3 VerificationReport (correctness on the campaign
-    sizes); `baseline_candidates` defaults to every known-library candidate
-    PLUS the cited literature SOTA baselines (qac/sota_baselines.py — CDKM /
-    Cuccaro arXiv:quant-ph/0410184), all filtered to those sharing the
-    candidate's spec. A certificate is therefore earned against the published
-    state of the art, not merely against this repo's own library.
+    A Pareto win allows ties at some sizes (including trivial base cases),
+    requires weak dominance on every measured axis and size, and requires
+    a strict gain somewhere against each baseline. With no matched baseline
+    the result is correct-only evidence. Literature novelty needs review.
     """
     cert = InnovationCertificate(candidate_id=candidate.id)
-    reasons: list[str] = []
+    try:
+        sizes = verification_sizes(extended_sizes)
+        if report is not None:
+            if report.candidate_id != candidate.id or not report.passed:
+                cert.reasons.append("Layer-3 report is failing or belongs to a different candidate")
+                return cert
+            sizes = verification_sizes((*sizes, *report.sizes))
+    except ValueError as exc:
+        cert.reasons.append(str(exc))
+        return cert
 
-    # ---- Gate 1: CORRECTNESS (extended sweep + independent cross-check) ----
-    correct = True
-    if report is not None and not report.passed:
-        correct = False
-        reasons.append("Layer-3 report failed: candidate is not even correct")
-    for n in extended_sizes:
-        circuit = candidate.build(n)
-        data_n = candidate.n_data(n)
-        anc = candidate.ancilla(n)
-        if circuit.n != data_n + len(anc) or circuit.n > 14:
-            continue
-        sem = check_semantics(circuit, candidate.spec(n), data_n)
-        if not sem.ok:
-            correct = False
-            reasons.append(f"extended-size n={n}: {sem.reasons[:2]}")
-            break
-        if not _kickmix_check(circuit, candidate.spec(n), data_n):
-            correct = False
-            reasons.append(f"kickmix cross-check disagrees at n={n}")
-            break
-        cert.extended_sizes.append(n)
+    verification = evaluate_candidate(candidate, sizes=sizes)
+    if not verification.passed:
+        cert.reasons.extend(verification.failure_reasons)
+        return cert
 
-    # ---- collect same-spec baselines --------------------------------------
+    circuits = {}
+    try:
+        for n in sizes:
+            circuit = candidate.build(n)
+            circuit.validate()
+            data_n = candidate.n_data(n)
+            outputs = expected_outputs(candidate.spec(n), data_n)
+            if verification.semantic_backend[n] == "packed":
+                if not _kickmix_check(circuit, outputs):
+                    cert.reasons.append(f"n={n}: independent Kickmix check disagrees")
+                    return cert
+                cert.kickmix_sizes.append(n)
+            if (verification.semantic_backend[n] == "statevector"
+                    or circuit.n <= dense_crosscheck_max_width):
+                if verification.semantic_backend[n] != "statevector":
+                    result = check_semantics(circuit, outputs.__getitem__, data_n)
+                    if not result.ok:
+                        cert.reasons.append(f"n={n}: dense statevector check disagrees: {result.reasons[0]}")
+                        return cert
+                cert.statevector_sizes.append(n)
+            circuits[n] = circuit
+            cert.extended_sizes.append(n)
+            cert.resources[n] = _resources(circuit)
+    except Exception as exc:
+        cert.reasons.append(f"verification raised {type(exc).__name__}: {exc}")
+        return cert
+    cert.correct = True
+
     if baseline_candidates is None:
         from .library import KnownAlgorithmLibrary
-        from .sota_baselines import sota_baselines
+        from .sota_baselines import sota_baselines, specialized_baselines
 
-        lib = KnownAlgorithmLibrary()
-        # Library first, then literature SOTA: ordering only matters for the
-        # duplicate_verdict string (first same-unitary match wins), and the
-        # library entry is the canonical name a re-derivation should report.
-        baseline_candidates = list(lib._entries.values()) + sota_baselines()
-    same_spec_baselines = [b for b in baseline_candidates if _same_spec(candidate, b)]
-    cert.baselines_compared = [b.id for b in same_spec_baselines]
+        library = KnownAlgorithmLibrary()
+        baseline_candidates = [*library.candidates(), *sota_baselines(), *specialized_baselines(library).values()]
 
-    # ---- Gate 2: VALUE (strict Pareto dominance at every verified size) ----
-    valuable = True
-    if not same_spec_baselines:
-        # No baseline solves this problem: any correct candidate is valuable
-        # (necessity mode — the alternative is "no solution at all").
-        cert.pareto_strict_axes = ["first_solution"]
-    else:
-        sizes_common = [n for n in extended_sizes if n in (set(cert.extended_sizes) | {3, 4, 5})]
-        strict_axes_all: set[str] | None = None
-        for b in same_spec_baselines:
-            dominated = True
-            strict_axes: set[str] = set()
-            for n in sizes_common:
-                try:
-                    mine, theirs = candidate.build(n), b.build(n)
-                except Exception:
-                    dominated = False
-                    break
-                rm, rt = _resources(mine), _resources(theirs)
-                for axis in ("width", "toffoli", "gates", "depth"):
-                    if rm[axis] > rt[axis]:
-                        dominated = False
-                        break
-                    if rm[axis] < rt[axis]:
-                        strict_axes.add(axis)
-                if not dominated:
-                    break
-            if not dominated:
-                valuable = False
-                reasons.append(f"not Pareto-better than baseline '{b.id}' at every size")
-            else:
-                cert.dominated_baselines.append(b.id)
-                strict_axes_all = strict_axes if strict_axes_all is None else (strict_axes_all & strict_axes)
-        if valuable and strict_axes_all is not None:
-            cert.pareto_strict_axes = sorted(strict_axes_all)
-            if not cert.pareto_strict_axes:
-                valuable = False
-                reasons.append("Pareto-equal on every axis: delivers no measurable value")
-
-    # ---- Gate 3: NOVELTY (duplicate detection vs every same-spec baseline) --
-    novel = True
-    for b in same_spec_baselines:
-        dup = False
-        for n in (s for s in extended_sizes if s <= unitary_crosscheck_max_n):
-            try:
-                mine, theirs = candidate.build(n), b.build(n)
-            except Exception:
+    strict_axes: set[str] | None = None
+    duplicates = []
+    for baseline in baseline_candidates:
+        try:
+            if not _same_spec(candidate, baseline, sizes):
                 continue
-            if _fingerprint(mine) == _fingerprint(theirs):
-                dup = True
-                break
-            eq = _unitaries_equal(mine, theirs)
-            if eq is True:
-                dup = True
-                break
-        if dup:
-            novel = False
-            cert.novelty_verdict = f"duplicate_of:{b.id}"
-            reasons.append(
-                f"identical (unitary-equal or same gate list) to known baseline '{b.id}' "
-                "at every size — re-derivation, not invention"
-            )
-            break
-    if novel:
-        cert.novelty_verdict = "distinct"
+            cert.baselines_compared.append(baseline.id)
+            checked = evaluate_candidate(baseline, sizes=sizes, require_poly=False)
+            if not checked.passed:
+                raise ValueError(f"baseline verification failed: {checked.failure_reasons[0]}")
+            references = {n: baseline.build(n) for n in sizes}
+            profiles = {n: _resources(circuit) for n, circuit in references.items()}
+        except Exception as exc:
+            cert.reasons.append(f"could not compare baseline '{baseline.id}': {exc}")
+            return cert
 
-    cert.correct = correct
-    cert.valuable = valuable
-    cert.novel = novel
-    cert.certified = correct and valuable and novel
-    if not cert.certified:
-        cert.reasons = reasons
+        cert.baseline_resources[baseline.id] = profiles
+        if all(_fingerprint(circuits[n]) == _fingerprint(references[n]) for n in sizes):
+            duplicates.append(baseline.id)
+        regressions = []
+        gains = set()
+        improved = []
+        for n in sizes:
+            better = []
+            for axis in RESOURCE_AXES:
+                mine, theirs = cert.resources[n][axis], profiles[n][axis]
+                if mine > theirs:
+                    regressions.append((n, axis, mine, theirs))
+                elif mine < theirs:
+                    better.append(axis)
+            if better:
+                gains.update(better)
+                improved.append(n)
+        cert.improved_sizes[baseline.id] = improved
+        if regressions:
+            n, axis, mine, theirs = regressions[0]
+            cert.reasons.append(f"baseline '{baseline.id}': {axis} regresses at n={n} ({mine} > {theirs})")
+        elif not improved:
+            cert.reasons.append(f"baseline '{baseline.id}': equal resource profiles on all checked sizes")
+        else:
+            cert.dominated_baselines.append(baseline.id)
+            strict_axes = gains if strict_axes is None else strict_axes & gains
+
+    if not cert.baselines_compared:
+        cert.novelty_verdict = "unbenchmarked"
+        cert.reasons.append("no verified same-contract baseline was supplied or found")
+        return cert
+
+    cert.valuable = len(cert.dominated_baselines) == len(cert.baselines_compared)
+    cert.pareto_strict_axes = sorted(strict_axes or ()) if cert.valuable else []
+    cert.novel = not duplicates
+    cert.novelty_verdict = "distinct" if cert.novel else f"duplicate_of:{duplicates[0]}"
+    if duplicates:
+        cert.reasons.append(f"same normalized gate schedule as '{duplicates[0]}' at all checked sizes")
+    cert.certified = cert.correct and cert.valuable and cert.novel
     return cert
