@@ -6,7 +6,7 @@
 2. **搜索**同一功能下更省资源的参数化线路（Track B）；
 3. 用**确定性机器检查**判断某条线路是否“正确、有价值、结构上新”（三重条件），只有全部通过才允许称为一项成果。
 
-所有结论都由代码现场跑出来，不靠口头声明。当前实现是纯 Python 标准库 + numpy，测试共 **129 项**（`tests/test_qac.py` 110 项 + `tests/test_evolution.py` 19 项），全部通过。
+所有结论都由代码现场跑出来，不靠口头声明。当前实现是纯 Python 标准库 + numpy，测试共 **130 项**（`tests/test_qac.py` 111 项 + `tests/test_evolution.py` 19 项），全部通过。
 
 **本轮结果。** 在 12 个同规约基线之上，机器认证了 **13 条新构造**：多数阈值、加权阈值、定值比较、常数加法，四个“顶写族”——受控增量器、取负器、汉明重量计数器、比较器（见[四个顶写族新构造](#四个顶写族新构造)），以及新的精简模加法器 `invented:modadd-lean`（同规约战胜 CDKM 基线，见[模加法器](#模加法器-inventedmodadd-lean)）。在 `n=10` 的加权阈值任务上，低位优先构造把 Toffoli 数从同门集固定宽度基线的 **227** 降到 **93**，逻辑深度从 **336** 降到 **146**，宽度为 **21**。每个新族都在每个验证尺寸上严格占优其同规约教科书实现。
 
@@ -41,7 +41,7 @@ python3 -m qac.cli audit --sizes 1,2,3,4,5,6,7,8     # 复核两种历史增量�
 python3 -m qac.cli search majority --seed 7 --holdout 6,7,8,10
 python3 -m qac.cli search weighted_threshold --seed 7 --holdout 6,7,8,10
 python3 -m qac.cli search less_than --seed 7 --holdout 6,7,8,10
-python3 -m pytest tests/ -q                          # 125 项测试
+python3 -m pytest tests/ -q                          # 130 项测试
 ```
 
 可选的真实 Qiskit 交叉复核（独立虚拟环境即可）：
@@ -365,34 +365,38 @@ X(0..n-1)                              # 还原 x
 
 契约（`mod_adder_spec`）：`a` 在位 `0..n-1`，`b` 在位 `n..2n-1`；映射 `(a, b) ↦ (a, a + b mod 2^n)`。这是 CDKM（Cuccaro–Draper–Kutin–Moulton）原地模加法的同规约版本——库中没有 `mod_adder` 族，唯一可比基线是 `sota:cdkm-mod-adder`。
 
-CDKM 的线路由一条 MAJ 链抬升进位、一条 UMA 链回落并写回结果，末端用辅助位 `h = 2n` 收尾。`invented:modadd-lean` 做两处**精确**裁剪（不是近似、不是概率性简化）：
+CDKM 的线路由一条 MAJ 链抬升进位、一条 UMA 链回落并写回结果，末端用辅助位 `h = 2n` 收尾。`invented:modadd-lean` 做三处**精确**裁剪（不是近似、不是概率性简化）：
 
-1. **辅助位尾门归零。** 最后一级 `UMA(a_0, b_0, h)` 的第三门是 `CNOT(z, y) = CNOT(h, b_0)`。但在它执行前，前面的 MAJ/UMA 对已经把 `h` 还原成 `|0>`，于是这一门翻转的是一个恒为 0 的受控位——删掉它语义完全不变。每个尺寸省 **1 门、1 深度**。
-2. **`n = 1` 无需辅助位。** 一位模加就是 `b_0 ⊕= a_0`，单个 CNOT 即可，不需要进位、不需要 `h`。宽度 `2`、Toffoli `0`、门数 `1`（基线为 `3 / 2 / 6`）。
+1. **折返点折叠（新）。** MAJ 链的最高一级是 `MAJ(a_{n-1}, b_{n-1}, a_{n-2})`，UMA 链的第一级恰好是 `UMA(a_{n-1}, b_{n-1}, a_{n-2})`——同一个三元组。MAJ 的末门 `CCX(a_{n-2}, b_{n-1}, a_{n-1})` 正是 UMA 的首门，两级内部的两个 `CNOT(a_{n-1}, a_{n-2})` 也完全重合，于是这一对坍缩成 `CNOT(a_{n-1}, b_{n-1})` 后接 `CNOT(a_{n-2}, b_{n-1})`。每个 `n ≥ 2` 省 **1 个 Toffoli、2 个 CNOT**。
+2. **辅助位尾门归零。** 最后一级 `UMA(a_0, b_0, h)` 的第三门是 `CNOT(z, y) = CNOT(h, b_0)`。但在它执行前，前面的 MAJ/UMA 对已经把 `h` 还原成 `|0>`，于是这一门翻转的是一个恒为 0 的受控位——删掉它语义完全不变。每个尺寸省 **1 门、1 深度**。
+3. **`n = 1` 无需辅助位。** 一位模加就是 `b_0 ⊕= a_0`，单个 CNOT 即可，不需要进位、不需要 `h`。宽度 `2`、Toffoli `0`、门数 `1`（基线为 `3 / 2 / 6`）。
 
 ```text
 n = 1:  CX(0, 1)
 
 n ≥ 2:  MAJ(a_0, b_0, h)
-        for i = 0..n-2:  MAJ(a_{i+1}, b_{i+1}, a_i)
-        for i = n-2..0:  UMA(a_{i+1}, b_{i+1}, a_i)
-        UMA(a_0, b_0, h) 去掉末门 CNOT(h, b_0)      # h 已归零
+        for i = 0..n-3:  MAJ(a_{i+1}, b_{i+1}, a_i)
+        CX(a_{n-1}, b_{n-1});  CX(a_{n-2}, b_{n-1})    # 折返点折叠，取代最高一级 MAJ/UMA
+        for i = n-3..0:  UMA(a_{i+1}, b_{i+1}, a_i)
+        UMA(a_0, b_0, h) 去掉末门 CNOT(h, b_0)          # h 已归零
 ```
+
+成本闭式（`n ≥ 2`）：宽度 `2n+1`、Toffoli `2n-2`、门数 `6n-5`、深度 `5n-4`。
 
 | n | 本构造 W/T/G/D | CDKM W/T/G/D | 严格更优轴 |
 |---|---|---|---|
 | 1 | 2/0/1/1 | 3/2/6/6 | W、T、G、D |
-| 2 | 5/4/11/10 | 5/4/12/11 | G、D |
-| 3 | 7/6/17/15 | 7/6/18/16 | G、D |
-| 4 | 9/8/23/20 | 9/8/24/21 | G、D |
-| 5 | 11/10/29/25 | 11/10/30/26 | G、D |
-| 6 | 13/12/35/30 | 13/12/36/31 | G、D |
-| 7 | 15/14/41/35 | 15/14/42/36 | G、D |
-| 8 | 17/16/47/40 | 17/16/48/41 | G、D |
-| 9 | 19/18/53/45 | 19/18/54/46 | G、D |
-| 10 | 21/20/59/50 | 21/20/60/51 | G、D |
+| 2 | 5/2/7/6 | 5/4/12/11 | T、G、D |
+| 3 | 7/4/13/11 | 7/6/18/16 | T、G、D |
+| 4 | 9/6/19/16 | 9/8/24/21 | T、G、D |
+| 5 | 11/8/25/21 | 11/10/30/26 | T、G、D |
+| 6 | 13/10/31/26 | 13/12/36/31 | T、G、D |
+| 7 | 15/12/37/31 | 15/14/42/36 | T、G、D |
+| 8 | 17/14/43/36 | 17/16/48/41 | T、G、D |
+| 9 | 19/16/49/41 | 19/18/54/46 | T、G、D |
+| 10 | 21/18/55/46 | 21/20/60/51 | T、G、D |
 
-四条轴全部弱占优，并在 `n = 1` 上四项全部严格更优、在 `n ≥ 2` 上每尺寸门数与深度各少 **1**。证书：四项判定全真，`distinct`，独占基线 `sota:cdkm-mod-adder`，`pareto_strict_axes = ["depth", "gates", "toffoli", "width"]`。逐基态稠密检查 `n=1..6`（宽度 `2n+1 ≤ 13`），`n=1..10` 资源表由 `TestLeanModAdder` 钉住。
+四条轴全部弱占优：`n = 1` 上四项全部严格更优，`n ≥ 2` 上每尺寸 Toffoli 少 **2**、门数与深度各少 **5**。对结果再做单门与相邻门对的删除搜索，所有 `n` 均无可删门（局部极小）。证书：四项判定全真，`distinct`，独占基线 `sota:cdkm-mod-adder`，`pareto_strict_axes = ["depth", "gates", "toffoli", "width"]`。逐基态稠密检查 `n=1..6`（宽度 `2n+1 ≤ 13`），`n=1..10` 资源表由 `TestLeanModAdder` 钉住。
 
 ## 五个进化构造详解
 
@@ -1048,7 +1052,7 @@ n=5 的实测值与上表闭式一致：`sota:cdkm-mod-adder` 为 `11/10/30/26`�
 | 3 | "三重认证门"含义宽泛，读起来像"任何新线路都能认证" | 三道门是并列必要条件，任一门不满足即 `certified=False`。且"真创新"有明确作用域：只在**同规约**基线池内查重；非同规约家族标 `literature_status="unassessed"` | [发现与认证机制](#发现与认证机制)；`test_correct_but_valueless_is_rejected`、`test_duplicate_of_known_is_not_novel` |
 | 4 | `compare` 的功能写作 `flag ← [x ≥ y]` | 实际契约是 `f ⊕= [x < y]`（`f` 初值为 0 时才等价于"小于"标志）。代码以 `compare_spec` 为准，测试按此逐输入核对 | `qac/library.py` |
 | 5 | `KnownAlgorithmLibrary().synthesize(key, n)` "返回 `Circuit`" | 返回的是 `Candidate`，且不吃 `n` 打样；要拿线路须调 `.build(n)`。属性是 `.id` 而非 `.candidate_id` | [调用方式（注意返回类型）](#调用方式注意返回类型) |
-| 6 | "78 项测试全部通过"；测试名 `test_portfolio_inventions_are_all_triple_certified` | 现为 **125 项**（`test_qac.py` 106 + `test_evolution.py` 19）；实际测试名是 `test_portfolio_optimizations_are_all_triple_certified` | `PYTHONPATH=. python3 -m pytest tests/ -q` |
+| 6 | "78 项测试全部通过"；测试名 `test_portfolio_inventions_are_all_triple_certified` | 现为 **130 项**（`test_qac.py` 111 + `test_evolution.py` 19）；实际测试名是 `test_portfolio_optimizations_are_all_triple_certified` | `PYTHONPATH=. python3 -m pytest tests/ -q` |
 
 除这六条外，旧版的架构图、分阶段计划、工程护栏和案例研究**仍然有效**，已分别整理进[路线图与阶段计划](#路线图与阶段计划)、[工程护栏](#工程护栏)和[真实案例](#真实案例ai-发现的新算法)。
 
@@ -1161,11 +1165,11 @@ quantum_algorithm_creator/
 ├── benchmarks/
 │   └── qiskit_crosscheck.py   # 独立 Qiskit 复核（不进主测试套件，见下）
 └── tests/
-    ├── test_qac.py            # 106 项：库、沙箱、认证门、SOTA、新构造
+    ├── test_qac.py            # 111 项：库、沙箱、认证门、SOTA、新构造
     └── test_evolution.py      # 19 项：进化循环、存档、留出验证
 ```
 
-合计 12 个 qac 模块（约 3100 行）、2 个测试文件（125 项）、1 个可选基准脚本。各模块的文件规模：
+合计 12 个 qac 模块（约 3100 行）、2 个测试文件（130 项）、1 个可选基准脚本。各模块的文件规模：
 
 | 模块 | 行数 | 职责 |
 |---|---:|---|
@@ -1191,7 +1195,7 @@ quantum_algorithm_creator/
 - **复现全部验证**：
 
   ```bash
-  PYTHONPATH=. python3 -m pytest tests/ -q     # 125 passed
+  PYTHONPATH=. python3 -m pytest tests/ -q     # 130 passed
   ```
 
 - **可选独立复核**（需要 Qiskit）：
@@ -1238,7 +1242,7 @@ git show 6871d639de2b2a02bebcf0ce210d28f5cc09e413:README.md
 | SOTA 基线（CDKM） | [对照文献 SOTA](#对照文献-sota) | 保留，补逐尺寸表与"恰好两个配对"结论 |
 | 分阶段开发计划（5 阶段） | [路线图与阶段计划](#路线图与阶段计划) | 保留，加"当前状态"列 |
 | 工程护栏（2 条） | [工程护栏](#工程护栏) | 保留，补实现细节与两条新增待办 |
-| 仓库结构 | [仓库结构](#仓库结构) | 更新：12 个 qac 模块、125 项测试 |
+| 仓库结构 | [仓库结构](#仓库结构) | 更新：12 个 qac 模块、130 项测试 |
 | 许可与引用 | 本节 | 保留并扩充 |
 
 </details>

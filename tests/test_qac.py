@@ -1117,14 +1117,14 @@ class TestCompareCarry:
 # ===========================================================================
 
 class TestLeanModAdder:
-    """(a, b) -> (a, a + b mod 2^n) with two exact trims over CDKM."""
+    """(a, b) -> (a, a + b mod 2^n) with three exact trims over CDKM."""
 
     # Machine-measured costs (n -> width, toffoli, gates, depth).
     PINNED = {
-        1: (2, 0, 1, 1), 2: (5, 4, 11, 10), 3: (7, 6, 17, 15),
-        4: (9, 8, 23, 20), 5: (11, 10, 29, 25), 6: (13, 12, 35, 30),
-        7: (15, 14, 41, 35), 8: (17, 16, 47, 40), 9: (19, 18, 53, 45),
-        10: (21, 20, 59, 50),
+        1: (2, 0, 1, 1), 2: (5, 2, 7, 6), 3: (7, 4, 13, 11),
+        4: (9, 6, 19, 16), 5: (11, 8, 25, 21), 6: (13, 10, 31, 26),
+        7: (15, 12, 37, 31), 8: (17, 14, 43, 36), 9: (19, 16, 49, 41),
+        10: (21, 18, 55, 46),
     }
 
     def test_exhaustive_semantics_n1_to_6(self):
@@ -1143,11 +1143,23 @@ class TestLeanModAdder:
         for n in range(2, 11):
             lean, base = lean_mod_adder(n), build_cuccaro_mod_adder(n)
             assert lean.n <= base.n
-            assert lean.toffoli_count() <= base.toffoli_count()
-            assert lean.gate_count() == base.gate_count() - 1   # zero-helper tail
-            assert lean.depth() == base.depth() - 1
+            # folded turning point (-1 Toffoli) + zero-helper tail (-1 CNOT).
+            assert lean.toffoli_count() == base.toffoli_count() - 2
+            # folded turning point (-2 CNOT) + zero-helper tail (-1 CNOT)
+            # plus the two inner CNOTs freed by the fold (-2 depth levels).
+            assert lean.gate_count() == base.gate_count() - 5
+            assert lean.depth() == base.depth() - 5
         assert lean_mod_adder(1).n == 2          # helper-free n = 1
         assert lean_mod_adder(1).gate_count() == 1
+
+    def test_folded_turning_point_gates(self):
+        for n in range(2, 8):
+            circuit = lean_mod_adder(n)
+            start = 3 * n - 3          # 3 gates of _maj(a0,b0,h) + 3 per lower MAJ
+            turning = circuit.gates[start:start + 2]
+            assert len(turning) == 2
+            assert isinstance(turning[0], CNOT) and turning[0].c == n - 1 and turning[0].t == 2 * n - 1
+            assert isinstance(turning[1], CNOT) and turning[1].c == n - 2 and turning[1].t == 2 * n - 1
 
     def test_triple_certified_all_four_axes_strict(self):
         cand = sota_inventions()[0][0]

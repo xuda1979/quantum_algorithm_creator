@@ -185,25 +185,34 @@ def compare_carry(n: int) -> Circuit:
 # ---------------------------------------------------------------------------
 
 def lean_mod_adder(n: int) -> Circuit:
-    """CDKM in-place modular adder with both provable trims applied.
+    """CDKM in-place modular adder with three provable trims applied.
 
     Contract (``mod_adder_spec``): data bits 0..n-1 hold a, bits n..2n-1 hold b;
     map (a, b) -> (a, a + b mod 2^n). Same layout as ``sota:cdkm-mod-adder``
     (a[i] = i, b[i] = n + i, helper = 2n), so the comparison is apples to apples.
 
-    Two savings that leave semantics untouched:
+    Three savings that leave semantics untouched:
 
-    1. **Zero-helper tail.** The final UMA acts on (a_0, b_0, h), and by the time
+    1. **Folded turning point.** The MAJ chain ends with
+       ``MAJ(a_{n-1}, b_{n-1}, a_{n-2})`` and the UMA chain starts with
+       ``UMA(a_{n-1}, b_{n-1}, a_{n-2})`` — the *same* triple. MAJ's last gate
+       ``CCX(a_{n-2}, b_{n-1}, a_{n-1})`` is literally UMA's first gate, and the
+       two inner ``CNOT(a_{n-1}, a_{n-2})`` match too, so the pair collapses to
+       ``CNOT(a_{n-1}, b_{n-1})`` followed by ``CNOT(a_{n-2}, b_{n-1})``. Saves
+       one Toffoli and two CNOTs (T -1, G -2) at every n >= 2.
+
+    2. **Zero-helper tail.** The final UMA acts on (a_0, b_0, h), and by the time
        its last gate runs the helper has already been returned to |0| by the
        MAJ/UMA pair. The closing ``CNOT(z, y)`` therefore flips a qubit that is
        provably 0 — deleting it is exact, not approximate. Saves one CNOT per
        size at every n.
 
-    2. **Helper-free n = 1.** One-bit modular addition is ``b_0 ^= a_0``: a single
+    3. **Helper-free n = 1.** One-bit modular addition is ``b_0 ^= a_0``: a single
        CNOT, no carry at all. Width 2, Toffoli 0, gates 1 instead of 3/2/6.
 
-    Cost (n >= 2): W = 2n + 1, T = 2n, G = 6n - 1, D = 5n. Dominates the CDKM
-    baseline strictly on width (n = 1), gates and depth at every size.
+    Cost (n >= 2): W = 2n + 1, T = 2n - 2, G = 6n - 5, D = 5n - 4. Dominates the
+    CDKM baseline strictly on width (n = 1), and on Toffoli, gates and depth at
+    every size.
     """
     if n == 1:
         return Circuit(2, [CNOT(0, 1)])
@@ -212,11 +221,13 @@ def lean_mod_adder(n: int) -> Circuit:
     h = 2 * n
     gates: list = []
     gates += _maj(a(0), b(0), h)
-    for i in range(n - 1):
+    for i in range(n - 2):                        # MAJ chain, stopping below the top
         gates += _maj(a(i + 1), b(i + 1), a(i))
-    for i in reversed(range(n - 1)):
+    gates.append(CNOT(a(n - 1), b(n - 1)))        # folded turning point
+    gates.append(CNOT(a(n - 2), b(n - 1)))
+    for i in reversed(range(n - 2)):              # UMA chain below the top
         gates += _uma(a(i + 1), b(i + 1), a(i))
-    gates += _uma(a(0), b(0), h)[:-1]  # drop the provably no-op final CNOT
+    gates += _uma(a(0), b(0), h)[:-1]             # drop the provably no-op final CNOT
     return Circuit(2 * n + 1, gates)
 
 
