@@ -25,7 +25,7 @@ basis inputs at the sizes pinned in ``tests/test_qac.py``.
 from __future__ import annotations
 
 from .kickmix import CNOT, Circuit, Toffoli, X
-from .library import Candidate, KnownAlgorithmLibrary, popcount_m
+from .library import Candidate, KnownAlgorithmLibrary, lessthan_k, lessthan_spec, popcount_m
 from .sota_baselines import _maj, _uma, mod_adder_spec
 from .track_b import _topwrite_increment
 
@@ -34,6 +34,8 @@ __all__ = [
     "topwrite_negate",
     "topwrite_popcount",
     "compare_carry",
+    "lessthan_fused",
+    "lessthan_fused_candidate",
     "lean_mod_adder",
     "lean_mod_adder_candidate",
     "inventions",
@@ -181,7 +183,89 @@ def compare_carry(n: int) -> Circuit:
 
 
 # ---------------------------------------------------------------------------
-# 5. Modular adder: (a, b) -> (a, a + b mod 2^n) on the CDKM contract.
+# 5. Constant comparator: f -> f ^ [x < k] with the flag fused into the chain.
+# ---------------------------------------------------------------------------
+
+def lessthan_fused(n: int) -> Circuit:
+    """Ripple-borrow comparator whose top borrow step writes straight into the flag.
+
+    Contract (``lessthan_spec``): x = bits 0..n-2, flag f = bit n-1, and the map
+    is f ^= [x < k] with the fixed threshold k = min(n+1, 2^(n-1) - 1).
+
+    The textbook ``known:lessthan-borrow`` keeps the no-borrow chain
+    D_j = [x_{<j} >= k_{<j}] in ancilla slots, materializes D_m in a slot, flips
+    the flag with ``CNOT(slot, f)`` + ``X(f)``, then uncomputes the whole chain
+    by reversal. Here the *last* borrow step is fused into the flag instead:
+
+    * ``k_{m-1} = 1``: ``f ^= ~(x_{m-1} & D)`` = ``CCX(x_{m-1}, D, f)``, then ``X(f)``
+    * ``k_{m-1} = 0``: ``f ^= ~(x_{m-1} | D)`` = ``CNOT(D, f)``, ``CNOT(x_{m-1}, f)``,
+      ``CCX(x_{m-1}, D, f)``, then ``X(f)``
+
+    so the flag plays the part of the top slot and no materialize/uncompute
+    Toffoli pair is needed for it (W -1, T -1, G/D -2 at every size). The chain
+    below the top is constant-folded as well: while the running borrow value is
+    the constant one, ``k_j = 0`` steps skip, and ``k_j = 1`` steps reuse a live
+    data bit instead of a fresh slot (``D & x_j`` with ``D = 1`` is ``x_j``).
+
+    Verified exhaustively on all 2^n inputs for n = 1..9; costs are pinned per
+    size in ``tests/test_qac.py`` (the threshold is irregular, so there is no
+    single closed formula).
+    """
+    m = n - 1
+    k = lessthan_k(n)
+    if m < 1 or k == 0:
+        return Circuit(n)
+    flag = n - 1
+    if m == 1:  # k = 1: [x < 1] = ~x_0
+        return Circuit(2, [CNOT(0, flag), X(flag)])
+    kb = [(k >> j) & 1 for j in range(m)]
+    cur = ("q", 0) if kb[0] else ("c1",)  # ("c1",) constant one, else (tag, index)
+    nxt = n
+    compute: list = []
+    for j in range(1, m - 1):
+        if kb[j]:  # D' = D & x_j
+            if cur == ("c1",):
+                cur = ("q", j)
+            else:
+                s = nxt
+                nxt += 1
+                compute.append(Toffoli(j, cur[1], s))
+                cur = ("s", s)
+        else:  # D' = D | x_j, written into a fresh zeroed slot
+            if cur == ("c1",):
+                continue
+            s = nxt
+            nxt += 1
+            compute += [CNOT(j, s), CNOT(cur[1], s), Toffoli(j, cur[1], s)]
+            cur = ("s", s)
+    c = Circuit(nxt)
+    top = m - 1
+    if kb[top]:  # f ^= ~(x_top & D) = 1 ^ x_top & D
+        tail = ([CNOT(top, flag)] if cur == ("c1",) else [Toffoli(top, cur[1], flag)]) + [X(flag)]
+    elif cur == ("c1",):  # D_m = 1, so [x < k] is constant 0 here
+        tail = []
+    else:  # f ^= ~(x_top | D)
+        # Order the two flag CNOTs top-first so the data-bit control (top) is not
+        # blocked behind the long chain slot; depth drops by 1..3 with the
+        # identical gate count.
+        tail = [CNOT(top, flag), CNOT(cur[1], flag), Toffoli(cur[1], top, flag), X(flag)]
+    c.gates = compute + tail + list(reversed(compute))
+    return c
+
+
+def lessthan_fused_candidate() -> Candidate:
+    return Candidate(
+        "invented:lessthan-fused",
+        "A",
+        lessthan_fused,
+        lessthan_spec,
+        lambda n: n,
+        lambda n: list(range(n, lessthan_fused(n).n)),
+    )
+
+
+# ---------------------------------------------------------------------------
+# 6. Modular adder: (a, b) -> (a, a + b mod 2^n) on the CDKM contract.
 # ---------------------------------------------------------------------------
 
 def lean_mod_adder(n: int) -> Circuit:
@@ -274,6 +358,10 @@ def inventions() -> dict[str, list[tuple[Candidate, tuple[int, ...]]]]:
         "compare": [
             (_bind("compare", "invented:compare-carry", compare_carry),
              (1, 2, 3, 4, 5, 6)),
+        ],
+        "less_than": [
+            (_bind("less_than", "invented:lessthan-fused", lessthan_fused),
+             (1, 2, 3, 4, 5, 6, 7, 8, 9)),
         ],
     }
 

@@ -51,10 +51,11 @@ from qac.novelty import (
 from qac.library import increment_candidate_ancilla as _inc_cand
 from qac.inventions import (
     inventions, sota_inventions, topwrite_ctrl_increment, topwrite_negate,
-    topwrite_popcount, compare_carry, lean_mod_adder,
+    topwrite_popcount, compare_carry, lean_mod_adder, lessthan_fused,
 )
 from qac.library import (
     ctrl_increment_spec, negate_spec, compare_spec, popcount_spec, popcount_m,
+    lessthan_spec,
 )
 from qac.sota_baselines import (
     sota_baselines, CUCCARO_CITATION, CITATION_SHA256,
@@ -1110,6 +1111,66 @@ class TestCompareCarry:
         assert cert.novelty_verdict == "distinct"
         assert cert.pareto_strict_axes == ["gates"]
         assert cert.dominated_baselines == ["known:compare-ripple"]
+
+
+class TestLessthanFused:
+    """f ^= [x < k] with the top borrow step fused into the flag qubit."""
+
+    # Machine-measured costs (n -> width, toffoli, gates, depth).
+    PINNED = {
+        1: (1, 0, 0, 0), 2: (2, 0, 2, 2), 3: (3, 1, 2, 2), 4: (5, 3, 8, 7),
+        5: (6, 3, 6, 4), 6: (9, 7, 14, 10), 7: (8, 3, 10, 8), 8: (13, 11, 30, 22),
+        9: (14, 11, 30, 22), 10: (17, 15, 38, 26), 11: (17, 13, 36, 24),
+        12: (21, 19, 50, 36), 13: (22, 19, 50, 34),
+    }
+
+    def test_exhaustive_semantics_n1_to_9(self):
+        for n in range(1, 10):
+            rep = check_semantics(lessthan_fused(n), lessthan_spec(n), n)
+            assert rep.ok, (n, rep.reasons[:3])
+
+    def test_cost_profile_pinned(self):
+        for n, want in self.PINNED.items():
+            got = _resources(lessthan_fused(n))
+            assert (got["width"], got["toffoli"], got["gates"], got["depth"]) == want, (n, got)
+
+    def test_never_wider_fewer_toffoli_and_gates_at_every_size(self):
+        known = KnownAlgorithmLibrary().synthesize("less_than", 1)
+        for n in range(3, 13):
+            mine, base = lessthan_fused(n), known.build(n)
+            assert mine.n <= base.n
+            assert mine.toffoli_count() == base.toffoli_count() - 1
+            assert mine.gate_count() < base.gate_count()
+            assert mine.depth() < base.depth()
+
+    def test_no_deletable_gate_or_adjacent_pair(self):
+        for n in range(3, 9):
+            circuit = lessthan_fused(n)
+            gates, outputs = circuit.gates, [lessthan_spec(n)[z] for z in range(1 << n)]
+
+            def ok(seq):
+                for z, want in enumerate(outputs):
+                    st = KickmixState(circuit.n, z)
+                    for gate in seq:
+                        gate.apply_kickmix(st)
+                    if st.x != want or st.phase != 0:
+                        return False
+                return True
+
+            assert ok(gates)
+            assert not [i for i in range(len(gates)) if ok(gates[:i] + gates[i + 1:])]
+            assert not [i for i in range(len(gates) - 1) if ok(gates[:i] + gates[i + 2:])]
+
+    def test_triple_certified_all_four_axes_strict(self):
+        cand = inventions()["less_than"][0][0]
+        rep = evaluate_candidate(cand, sizes=tuple(range(1, 10)))
+        assert rep.passed, rep.failure_reasons
+        cert = certify_innovation(cand, report=rep, extended_sizes=tuple(range(1, 10)))
+        assert cert.certified, cert.reasons
+        assert cert.correct and cert.valuable and cert.novel
+        assert cert.novelty_verdict == "distinct"
+        assert cert.pareto_strict_axes == ["depth", "gates", "toffoli", "width"]
+        assert cert.dominated_baselines == ["known:lessthan-borrow"]
 
 
 # ===========================================================================
