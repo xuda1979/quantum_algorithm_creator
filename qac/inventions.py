@@ -24,8 +24,10 @@ basis inputs at the sizes pinned in ``tests/test_qac.py``.
 
 from __future__ import annotations
 
+from .arithmetic import threshold_flag
 from .kickmix import CNOT, Circuit, Toffoli, X
-from .library import Candidate, KnownAlgorithmLibrary, lessthan_k, lessthan_spec, popcount_m
+from .library import (Candidate, KnownAlgorithmLibrary, lessthan_k, lessthan_spec,
+                      majority_K, majority_spec, popcount_m)
 from .sota_baselines import _maj, _uma, mod_adder_spec
 from .track_b import _topwrite_increment
 
@@ -39,6 +41,8 @@ __all__ = [
     "lessthan_fused_candidate",
     "lean_mod_adder",
     "lean_mod_adder_candidate",
+    "majority_pruned",
+    "majority_pruned_candidate",
     "inventions",
     "sota_inventions",
 ]
@@ -379,6 +383,95 @@ def compare_topcarry(n: int) -> Circuit:
 
 
 # ---------------------------------------------------------------------------
+# 8. Majority vote: reachability-pruned counter + OR-marker threshold.
+# ---------------------------------------------------------------------------
+
+def _pruned_inc(i: int, base: int, slot: int) -> list:
+    """Add x_i into the counter at ``base`` using only live carry levels.
+
+    Before the i-th increment the counter holds v <= i, so the carry into
+    level j is provably 0 whenever 2^j > i + 1: only J = floor(log2(i+1))
+    levels can ever fire.  Level 2 (if live) is written straight into the
+    counter's top bit, and the dead levels above it are never allocated.
+    """
+    J = (i + 1).bit_length() - 1
+    g: list = []
+    if J == 1:
+        g.append(Toffoli(i, base, base + 1))          # top-write c_1 into a_1
+    elif J >= 2:
+        g.append(Toffoli(i, base, slot))              # c_1 = x_i & a_0
+        for j in range(1, J - 1):
+            g.append(Toffoli(slot + j - 1, base + j, slot + j))
+        g.append(Toffoli(slot + J - 2, base + J - 1, base + J))  # top-write c_J
+        for j in range(J - 1, 0, -1):
+            g.append(CNOT(slot + j - 1, base + j))
+            if j >= 2:
+                g.append(Toffoli(slot + j - 2, base + j - 1, slot + j - 1))
+            else:
+                g.append(Toffoli(i, base, slot))
+    g.append(CNOT(i, base))                           # a_0 ^= x_i
+    return g
+
+
+def majority_pruned(n: int) -> Circuit:
+    """Majority oracle with a reachability-pruned popcount counter.
+
+    Contract (``majority_spec``): x = bits 0..n-1, flag = bit n; the map is
+    flag ^= [popcount(x) >= ceil(n/2)].
+
+    Two independent savings over ``known:majority-vote``:
+
+    1. **Reachability pruning.** The reference runs all m-1 carry levels on
+       every one of the n increments. But before the i-th increment the
+       counter is at most i, so level j of the carry is provably zero for
+       2^j > i + 1 and its Toffoli is a no-op on every basis input. Keeping
+       only J = floor(log2(i+1)) levels removes the gates outright rather
+       than optimizing them, which is why the saving grows with n.
+    2. **Top-write on the last live level.** The last live carry is written
+       straight into the counter bit above it; there is no slot to store and
+       no second Toffoli to uncompute.
+
+    The threshold step reuses ``threshold_flag`` in OR-marker mode, which
+    folds the flag write into the last carry level (polarity off: ``maj(a, 0,
+    c) = a & c`` is a Toffoli, so the final level needs no extra CNOT).
+
+    Cost at n = 2..12 (W/T/G/D): (5,3,9,8), (6,4,11,10), (9,11,23,20),
+    (10,19,35,34), (11,25,45,44), (12,28,51,50), (15,39,69,66),
+    (16,53,93,90), (17,63,109,106), (18,71,119,116), (19,81,135,132).
+    Gains vs the reference at n = 10: T 63 < 126, G 109 < 217, D 106 < 213,
+    W 17 < 19; vs the tuned fixed-width baseline: T 63 < 105, G 109 < 171,
+    D 106 < 168 at equal width.
+
+    Verified exhaustively on all 2^n inputs for n = 1..7 (width 14 at n = 7
+    is the sandbox dense limit); cost profile pinned to n = 12.
+    """
+    if n == 1:
+        return Circuit(2, [CNOT(0, 1)])
+    m = popcount_m(n)
+    flag, base = n, n + 1
+    slot = base + m
+    inc: list = []
+    for i in range(n):
+        inc += _pruned_inc(i, base, slot)
+    mark = threshold_flag(tuple(range(base, base + m)), majority_K(n), flag,
+                          slot, fuse=True, polarity=False)
+    gates = inc + mark + list(reversed(inc))
+    width = max(gate.targets()[0] for gate in gates) + 1
+    return Circuit(max(width, flag + 1), gates)
+
+
+def majority_pruned_candidate() -> Candidate:
+    return Candidate(
+        "invented:majority-pruned",
+        "B",
+        majority_pruned,
+        majority_spec,
+        lambda n: n + 1,
+        lambda n: [] if n == 1 else list(range(n + 1, majority_pruned(n).n)),
+    )
+
+
+# ---------------------------------------------------------------------------
 # Registry: problem key -> (candidate_id, builder, pinned sizes for verification)
 # ---------------------------------------------------------------------------
 
@@ -415,6 +508,10 @@ def inventions() -> dict[str, list[tuple[Candidate, tuple[int, ...]]]]:
         "less_than": [
             (_bind("less_than", "invented:lessthan-fused", lessthan_fused),
              (1, 2, 3, 4, 5, 6, 7, 8, 9)),
+        ],
+        "majority": [
+            (_bind("majority", "invented:majority-pruned", majority_pruned),
+             (1, 2, 3, 4, 5, 6, 7)),
         ],
     }
 

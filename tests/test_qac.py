@@ -52,10 +52,11 @@ from qac.library import increment_candidate_ancilla as _inc_cand
 from qac.inventions import (
     inventions, sota_inventions, topwrite_ctrl_increment, topwrite_negate,
     topwrite_popcount, compare_carry, compare_topcarry, lean_mod_adder, lessthan_fused,
+    majority_pruned,
 )
 from qac.library import (
     ctrl_increment_spec, negate_spec, compare_spec, popcount_spec, popcount_m,
-    lessthan_spec,
+    lessthan_spec, majority_spec,
 )
 from qac.sota_baselines import (
     sota_baselines, CUCCARO_CITATION, CITATION_SHA256,
@@ -1293,3 +1294,78 @@ class TestLeanModAdder:
         assert cert.novelty_verdict == "distinct"
         assert cert.pareto_strict_axes == ["depth", "gates", "toffoli", "width"]
         assert cert.dominated_baselines == ["sota:cdkm-mod-adder"]
+
+
+class TestMajorityPruned:
+    """flag ^= [popcount(x) >= ceil(n/2)] with a reachability-pruned counter.
+
+    The reference runs every carry level of the counter on every increment.
+    But before the i-th increment the counter holds at most i, so carry level j
+    is provably zero whenever 2^j > i + 1: those Toffolis are deleted, not
+    optimized. The last live carry is top-written into the counter bit above
+    it, and the threshold reuses that region in OR-marker mode.
+    """
+
+    # Machine-measured costs (n -> width, toffoli, gates, depth).
+    PINNED = {
+        1: (2, 0, 1, 1), 2: (5, 3, 9, 8), 3: (6, 4, 11, 10), 4: (9, 11, 23, 20),
+        5: (10, 19, 35, 34), 6: (11, 25, 45, 44), 7: (12, 28, 51, 50),
+        8: (15, 39, 69, 66), 9: (16, 53, 93, 90), 10: (17, 63, 109, 106),
+        11: (18, 71, 119, 116), 12: (19, 81, 135, 132),
+    }
+
+    def test_exhaustive_semantics_n1_to_7(self):
+        # Dense statevector over x and the flag; width n+1+2m = 14 at n = 7 is
+        # the sandbox dense limit.
+        for n in range(1, 8):
+            rep = check_semantics(majority_pruned(n), majority_spec(n), n + 1)
+            assert rep.ok, (n, rep.reasons[:3])
+
+    def test_cost_profile_pinned(self):
+        for n in range(1, 13):
+            r = _resources(majority_pruned(n))
+            got = (r["width"], r["toffoli"], r["gates"], r["depth"])
+            assert got == self.PINNED[n], (n, got, self.PINNED[n])
+
+    def test_dominates_textbook_and_tuned_baseline_every_size(self):
+        known = KnownAlgorithmLibrary().synthesize("majority", 1).build
+        fixed = specialized_baselines(KnownAlgorithmLibrary())["majority"].build
+        for n in range(1, 13):
+            a = _resources(majority_pruned(n))
+            ka = (a["width"], a["toffoli"], a["gates"], a["depth"])
+            for rival in (known(n), fixed(n)):
+                b = _resources(rival)
+                kb = (b["width"], b["toffoli"], b["gates"], b["depth"])
+                assert all(p <= q for p, q in zip(ka, kb)), (n, ka, kb)
+
+    def test_savings_grow_with_n(self):
+        # Deletion, not optimization: the gate gap widens as more levels die.
+        known = KnownAlgorithmLibrary().synthesize("majority", 1).build
+        assert majority_pruned(2).toffoli_count() == known(2).toffoli_count() - 7
+        assert majority_pruned(10).toffoli_count() == known(10).toffoli_count() - 63
+        assert majority_pruned(10).gate_count() == known(10).gate_count() - 108
+        assert majority_pruned(10).depth() == known(10).depth() - 107
+
+    def test_triple_certified_three_axes_strict(self):
+        cand = inventions()["majority"][0][0]
+        assert cand.id == "invented:majority-pruned"
+        rep = evaluate_candidate(cand, sizes=tuple(range(1, 8)))
+        assert rep.passed, rep.failure_reasons
+        cert = certify_innovation(cand, report=rep, extended_sizes=tuple(range(1, 8)))
+        assert cert.certified, cert.reasons
+        assert cert.correct and cert.valuable and cert.novel
+        assert cert.novelty_verdict == "distinct"
+        assert cert.pareto_strict_axes == ["depth", "gates", "toffoli"]
+        assert cert.dominated_baselines == [
+            "known:majority-vote", "reference:fixed-width-majority",
+        ]
+
+    def test_registry_binding_matches_majority_contract(self):
+        cand, sizes = inventions()["majority"][0]
+        assert sizes == (1, 2, 3, 4, 5, 6, 7)
+        assert cand.id == "invented:majority-pruned"
+        for n in (1, 2, 3, 4, 5, 7):
+            assert cand.spec(n) == majority_spec(n)
+            assert cand.n_data(n) == n + 1
+            built = cand.build(n)
+            assert cand.ancilla(n) == list(range(n + 1, built.n))
