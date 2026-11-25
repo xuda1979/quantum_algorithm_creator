@@ -49,6 +49,13 @@ from qac.novelty import (
     InnovationCertificate, certify_innovation, _same_spec, _resources, _fingerprint,
 )
 from qac.library import increment_candidate_ancilla as _inc_cand
+from qac.inventions import (
+    inventions, topwrite_ctrl_increment, topwrite_negate,
+    topwrite_popcount, compare_carry,
+)
+from qac.library import (
+    ctrl_increment_spec, negate_spec, compare_spec, popcount_spec, popcount_m,
+)
 from qac.sota_baselines import (
     sota_baselines, CUCCARO_CITATION, CITATION_SHA256,
     build_cuccaro_mod_adder, build_cuccaro_increment, build_cuccaro_addconst,
@@ -952,3 +959,153 @@ class TestDecrementDualAudit:
         assert mine["width"] < wrap["width"]   # 13 < 15
         assert mine["gates"] < wrap["gates"]   # 18 < 38
         assert mine["depth"] < wrap["depth"]   # 18 < 24
+
+
+# ===========================================================================
+# Layer 2A inventions — four new families certified correct x valuable x novel
+# ===========================================================================
+
+class TestTopwriteCtrlIncrement:
+    """Controlled incrementer x -> (x + q) mod 2^n, top carry written in place."""
+
+    # Machine-measured costs (n -> width, toffoli, gates, depth).
+    PINNED = {
+        1: (2, 0, 1, 1), 2: (3, 1, 2, 2), 3: (5, 3, 5, 5), 4: (7, 5, 8, 8),
+        5: (9, 7, 11, 11), 6: (11, 9, 14, 14), 7: (13, 11, 17, 17),
+        8: (15, 13, 20, 20), 9: (17, 15, 23, 23), 10: (19, 17, 26, 26),
+    }
+
+    def test_exhaustive_semantics_n1_to_7(self):
+        # n = 8 needs width 2n-1 = 15, one past the dense statevector cap of 14.
+        for n in range(1, 8):
+            rep = check_semantics(topwrite_ctrl_increment(n), ctrl_increment_spec(n), n)
+            assert rep.ok, (n, rep.reasons[:3])
+
+    def test_cost_formulas_pinned(self):
+        for n, want in self.PINNED.items():
+            r = _resources(topwrite_ctrl_increment(n))
+            got = (r["width"], r["toffoli"], r["gates"], r["depth"])
+            assert got == want, (n, got, want)
+
+    def test_uses_one_fewer_carry_slot_than_textbook(self):
+        # Textbook needs n-1 carry slots (width 2n); this writes the top carry
+        # straight into the destination bit (width 2n-1).
+        known = KnownAlgorithmLibrary().synthesize("ctrl_increment", 1)
+        for n in range(2, 9):
+            assert topwrite_ctrl_increment(n).n == 2 * n - 1
+            assert known.build(n).n == 2 * n
+
+    def test_triple_certified_all_four_axes_strict(self):
+        cand = inventions()["ctrl_increment"][0][0]
+        rep = evaluate_candidate(cand, sizes=tuple(range(1, 9)))
+        assert rep.passed, rep.failure_reasons
+        cert = certify_innovation(cand, report=rep)
+        assert cert.certified, cert.reasons
+        assert cert.correct and cert.valuable and cert.novel
+        assert cert.novelty_verdict == "distinct"
+        assert cert.pareto_strict_axes == ["depth", "gates", "toffoli", "width"]
+        assert cert.dominated_baselines == ["known:ctrl-increment-ripple"]
+
+
+class TestTopwriteNegate:
+    """Two's-complement negation built on the top-write incrementer."""
+
+    PINNED = {
+        1: (1, 0, 0, 0), 2: (2, 0, 4, 3), 3: (3, 1, 6, 4), 4: (5, 3, 10, 7),
+        5: (7, 5, 14, 10), 6: (9, 7, 18, 13), 7: (11, 9, 22, 16),
+        8: (13, 11, 26, 19), 9: (15, 13, 30, 22), 10: (17, 15, 34, 25),
+    }
+
+    def test_exhaustive_semantics_n1_to_8(self):
+        for n in range(1, 9):
+            rep = check_semantics(topwrite_negate(n), negate_spec(n), n)
+            assert rep.ok, (n, rep.reasons[:3])
+
+    def test_cost_formulas_pinned(self):
+        for n, want in self.PINNED.items():
+            r = _resources(topwrite_negate(n))
+            got = (r["width"], r["toffoli"], r["gates"], r["depth"])
+            assert got == want, (n, got, want)
+
+    def test_triple_certified_all_four_axes_strict(self):
+        cand = inventions()["negate"][0][0]
+        rep = evaluate_candidate(cand, sizes=tuple(range(1, 9)))
+        assert rep.passed, rep.failure_reasons
+        cert = certify_innovation(cand, report=rep)
+        assert cert.certified, cert.reasons
+        assert cert.correct and cert.valuable and cert.novel
+        assert cert.novelty_verdict == "distinct"
+        assert cert.pareto_strict_axes == ["depth", "gates", "toffoli", "width"]
+        assert cert.dominated_baselines == ["known:negate-wrap"]
+
+
+class TestTopwritePopcount:
+    """Hamming-weight counter with the top carry written into the counter MSB."""
+
+    PINNED = {
+        1: (2, 0, 1, 1), 2: (4, 2, 4, 4), 3: (5, 3, 6, 6), 4: (8, 12, 20, 20),
+        5: (9, 15, 25, 25), 6: (10, 18, 30, 30), 7: (11, 21, 35, 35),
+        8: (14, 40, 64, 64), 9: (15, 45, 72, 72), 10: (16, 50, 80, 80),
+    }
+
+    def test_exhaustive_semantics_n1_to_4(self):
+        # Dense statevector over x plus the m-bit counter. Larger sizes exceed
+        # 9 qubits; the packed evaluator covers all sizes 1..8 in the
+        # certification test below.
+        for n in range(1, 5):
+            data_n = n + popcount_m(n)
+            rep = check_semantics(topwrite_popcount(n), popcount_spec(n), data_n)
+            assert rep.ok, (n, rep.reasons[:3])
+
+    def test_cost_formulas_pinned(self):
+        for n, want in self.PINNED.items():
+            r = _resources(topwrite_popcount(n))
+            got = (r["width"], r["toffoli"], r["gates"], r["depth"])
+            assert got == want, (n, got, want)
+
+    def test_triple_certified_all_four_axes_strict(self):
+        cand = inventions()["popcount"][0][0]
+        rep = evaluate_candidate(cand, sizes=tuple(range(1, 9)))
+        assert rep.passed, rep.failure_reasons
+        cert = certify_innovation(cand, report=rep)
+        assert cert.certified, cert.reasons
+        assert cert.correct and cert.valuable and cert.novel
+        assert cert.novelty_verdict == "distinct"
+        assert cert.pareto_strict_axes == ["depth", "gates", "toffoli", "width"]
+        assert cert.dominated_baselines == ["known:popcount-ripple"]
+
+
+class TestCompareCarry:
+    """Ripple comparator via carry(~x + y): gate-count win with zero inversions."""
+
+    PINNED = {
+        1: (4, 2, 9, 9), 2: (6, 4, 17, 13), 3: (8, 6, 25, 17), 4: (10, 8, 33, 21),
+        5: (12, 10, 41, 25), 6: (14, 12, 49, 29), 7: (16, 14, 57, 33),
+    }
+
+    def test_exhaustive_semantics_n1_to_6(self):
+        for n in range(1, 7):
+            rep = check_semantics(compare_carry(n), compare_spec(n), n)
+            assert rep.ok, (n, rep.reasons[:3])
+
+    def test_cost_formulas_pinned(self):
+        for n, want in self.PINNED.items():
+            r = _resources(compare_carry(n))
+            got = (r["width"], r["toffoli"], r["gates"], r["depth"])
+            assert got == want, (n, got, want)
+
+    def test_three_fewer_gates_than_textbook(self):
+        known = KnownAlgorithmLibrary().synthesize("compare", 1)
+        for n in range(1, 9):
+            assert compare_carry(n).gate_count() == known.build(n).gate_count() - 3
+
+    def test_triple_certified_gates_strict(self):
+        cand = inventions()["compare"][0][0]
+        rep = evaluate_candidate(cand, sizes=tuple(range(1, 7)))
+        assert rep.passed, rep.failure_reasons
+        cert = certify_innovation(cand, report=rep, extended_sizes=tuple(range(1, 7)))
+        assert cert.certified, cert.reasons
+        assert cert.correct and cert.valuable and cert.novel
+        assert cert.novelty_verdict == "distinct"
+        assert cert.pareto_strict_axes == ["gates"]
+        assert cert.dominated_baselines == ["known:compare-ripple"]

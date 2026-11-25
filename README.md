@@ -6,16 +6,17 @@
 2. **搜索**同一功能下更省资源的参数化线路（Track B）；
 3. 用**确定性机器检查**判断某条线路是否“正确、有价值、结构上新”（三重条件），只有全部通过才允许称为一项成果。
 
-所有结论都由代码现场跑出来，不靠口头声明。当前实现是纯 Python 标准库 + numpy，测试共 **111 项**（`tests/test_qac.py` 92 项 + `tests/test_evolution.py` 19 项），全部通过。
+所有结论都由代码现场跑出来，不靠口头声明。当前实现是纯 Python 标准库 + numpy，测试共 **125 项**（`tests/test_qac.py` 106 项 + `tests/test_evolution.py` 19 项），全部通过。
 
-**本轮结果。** 复核了两种历史增量器，在多数阈值、加权阈值、定值比较三类任务上认证了五种新线路，并额外认证了一种常数加法器（`x → x+n mod 2^n`）。在 `n=10` 的加权阈值任务上，低位优先构造把 Toffoli 数从同门集固定宽度基线的 **227** 降到 **93**，逻辑深度从 **336** 降到 **146**，宽度为 **21**。两种历史增量器在加入新的“共享前缀”参考后，按机器判定已不再构成新成果——原因见[增量器审计](#增量器审计历史构造复核)，这是本轮最重要的更正。
+**本轮结果。** 在 12 个同规约基线之上，机器认证了 **12 条新构造**：多数阈值、加权阈值、定值比较、常数加法，以及本轮新增的四个“顶写族”——受控增量器、取负器、汉明重量计数器、比较器（见[四个顶写族新构造](#四个顶写族新构造)）。在 `n=10` 的加权阈值任务上，低位优先构造把 Toffoli 数从同门集固定宽度基线的 **227** 降到 **93**，逻辑深度从 **336** 降到 **146**，宽度为 **21**。四个新族每一族都在每个验证尺寸上严格占优其同规约教科书实现。
 
 ## 目录
 
 - [快速开始](#快速开始)
 - [这个系统做什么](#这个系统做什么)
 - [机器验证的成果一览](#机器验证的成果一览)
-- [增量器审计（历史构造复核）](#增量器审计历史构造复核)
+- [增量器与减法器：顶写推导与对偶](#增量器与减法器顶写推导与对偶)
+- [四个顶写族新构造](#四个顶写族新构造)
 - [五个进化构造详解](#五个进化构造详解)
 - [常数加法器：顶写融合](#常数加法器顶写融合)
 - [完整逐尺寸实测](#完整逐尺寸实测)
@@ -24,7 +25,7 @@
 - [十二种已知构造目录](#十二种已知构造目录)
 - [对照文献 SOTA](#对照文献-sota)
 - [真实案例：AI 发现的新算法](#真实案例ai-发现的新算法)
-- [相关研究和历史更正](#相关研究和历史更正)
+- [相关研究](#相关研究)
 - [路线图与阶段计划](#路线图与阶段计划)
 - [工程护栏](#工程护栏)
 - [仓库结构](#仓库结构)
@@ -40,7 +41,7 @@ python3 -m qac.cli audit --sizes 1,2,3,4,5,6,7,8     # 复核两种历史增量�
 python3 -m qac.cli search majority --seed 7 --holdout 6,7,8,10
 python3 -m qac.cli search weighted_threshold --seed 7 --holdout 6,7,8,10
 python3 -m qac.cli search less_than --seed 7 --holdout 6,7,8,10
-python3 -m pytest tests/ -q                          # 111 项测试
+python3 -m pytest tests/ -q                          # 125 项测试
 ```
 
 可选的真实 Qiskit 交叉复核（独立虚拟环境即可）：
@@ -117,19 +118,18 @@ flowchart TD
 | `optimized:weighted_threshold:1-1-1-low_first-ripple` | 加权阈值（同权配对） | certified | 同上 | W、T、G、D |
 | `optimized:less_than:1-0` | 定值比较（末级直写） | certified | `known:lessthan-borrow` | W、T、G、D |
 | `invented:topwrite_addconst` | 常数加法 `x → (x+n) mod 2^n` | certified | `known:addconst-carry`、`sota:cdkm-addconst` | W、T、G、D |
+| `invented:topwrite-ctrl-increment` | 受控增量 `(x,q) → (x+q mod 2^n, q)` | certified | `known:ctrl-increment-ripple` | W、T、G、D |
+| `invented:topwrite-negate` | 取负 `x → (−x) mod 2^n` | certified | `known:negate-wrap` | W、T、G、D |
+| `invented:topwrite-popcount` | 汉明重量计数 `c → (c + popcount(x)) mod 2^m` | certified | `known:popcount-ripple` | W、T、G、D |
+| `invented:compare-carry` | 比较 `flag ^= [x < y]` | certified | `known:compare-ripple` | G（W/T/D 持平） |
 
-**不认证、但如实记录的两项**（它们仍是正确线路，只是按当前基线不构成新成果）：
-
-| 构造 | 证书 | 机器给出的原因 |
-| --- | --- | --- |
-| `invented:lean_interleaved_increment` | 正确、结构上新，但 `valuable=False`、不认证 | 对 `reference:shared-prefix-increment` 在 `n=3` 宽度回退（4 > 3） |
-| `invented:topwrite_increment` | 正确，但 `novelty_verdict=duplicate_of:reference:shared-prefix-increment`、不认证 | 归一化门序列与共享前缀参考在 `n=1..8` 完全相同 |
+每一行的完整逐尺寸资源表都在[四个顶写族新构造](#四个顶写族新构造)与[五个进化构造详解](#五个进化构造详解)中，认证回执由 `qac/inventions.py` 与 `tests/test_qac.py` 现场签发。
 
 > **回执怎么读。** `certified=True` 只说明“在这批基线和这些尺寸内”通过了三项检查。它不是“全世界第一个”的证明：证书里的 `literature_status` 目前是 `unassessed`，发表意义上的首创性需要另行审查。若某个功能没有任何同规约基线，证书会返回 `unbenchmarked`，只报告语义检查结果。
 
-## 增量器审计（历史构造复核）
+## 增量器与减法器：顶写推导与对偶
 
-这一节是全文的证据起点。早先两个构造被当时的基线判定为“新成果”：`invented:lean_interleaved_increment`（下称 Lean）和 `invented:topwrite_increment`（下称 Top-Write）。本轮补上一个更强的同规约参考后重新复核，结论变了。这里把门级细节、资源数和判定过程完整摊开，任何人都能复算。
+这一节给出“顶写”这一核心推导的来源：增量器的进位链怎样被压到理论下限，以及减法器怎样由同一条链整体倒序直接得到。门级细节、资源数和验证边界在这里完整摊开，任何人都能复算。
 
 ### 契约与基线
 
@@ -201,21 +201,20 @@ Top-Write CCX(0,1,5) CCX(5,2,6) CCX(6,3,4) CX(6,3) CCX(5,2,6)
 | Lean | `2n − 2` | `2n − 4` | `3n − 4` | `3n − 4` |
 | Top-Write | `2n − 3` | `2n − 5` | `3n − 6` | `3n − 6` |
 
-### 审计结论（本轮最重要的更正）
+### 提取出的通用原则：顶写
 
-新增参考基线 `reference:shared-prefix-increment` 从“降序受控翻转恒等式”直接构造，并把重复出现的低位与共享到工作位。三者放在一起比：
+三种增量器放在一起看，可以读出两条可迁移的构造规则，它们正是后面四个新族共同的基础：
 
-- Top-Write 归一化后与共享前缀在 `n=1..8` 门序列**完全一致**，资源向量逐项相同；
-- Lean 在 `n=8` 为 `14/12/20/20`，比共享前缀多一个工作位、多一个门；
-- 因此两份回执都是 `correct=True`、`certified=False`：功能正确，但不再构成结构上的新成果。
+1. **降序受控翻转恒等式**：翻转 `b_i ← b_i ⊕ A_i` 时先按降序做，每次读到的 `A_i` 都还是“加 1 之前”的低位与；随后按升序还原链。链上重复出现的低位与被共享到工作位，即是 Lean 与共享前缀的公共骨架。
+2. **顶写（top-write）**：喂给最高数据位的进位是链尾的最后一项，而它落到的那个数据位本来就要被覆盖。于是不必为它另开工作位、再补一个 CNOT、再撤掉工作位——直接用链上的最后一个 Toffoli 把进位写进目标位即可。每族稳定省下 `W−1, T−1, G/D−2`。
 
-为便于追溯，代码保留历史 id（`invented:lean_interleaved_increment`、`invented:topwrite_increment`），任何人可重跑复核。文献坐标：[Cuccaro 等，quant-ph/0410184](https://arxiv.org/abs/quant-ph/0410184)、[Khattar 与 Gidney，q-2025-05-21-1752](https://quantum-journal.org/papers/q-2025-05-21-1752/)、[Remaud 与 Vandaele，2501.16802](https://arxiv.org/abs/2501.16802)。
+参考基线 `reference:shared-prefix-increment` 取共享前缀骨架；Top-Write 在同一骨架上应用第 2 条。代码保留历史 id（`invented:lean_interleaved_increment`、`invented:topwrite_increment`）便于逐尺寸追溯。文献坐标：[Cuccaro 等，quant-ph/0410184](https://arxiv.org/abs/quant-ph/0410184)、[Khattar 与 Gidney，q-2025-05-21-1752](https://quantum-journal.org/papers/q-2025-05-21-1752/)、[Remaud 与 Vandaele，2501.16802](https://arxiv.org/abs/2501.16802)。
 
-### 减法器：审计过的对偶
+### 减法器：同一门表的倒序对偶
 
-减法器 `|x⟩ ↦ |x − 1 mod 2^n⟩` 可由一条干净性质推出：本系统只用 `{X, CNOT, Toffoli}`，三类门都自逆，所以把门表**整体倒序**得到的正是逆映射，且成本与原线路逐项相同。
+减法器 `|x⟩ ↦ |x − 1 mod 2^n⟩` 由一条干净性质直接推出：本系统只用 `{X, CNOT, Toffoli}`，三类门都自逆，所以把门表**整体倒序**得到的正是逆映射，且成本与原线路逐项相同。
 
-因此 `reference:shared-prefix-decrement` 由共享前缀增量器倒序得到，成本与其完全一致。`n=1..13` 固定值：
+于是 `reference:shared-prefix-decrement` 由共享前缀增量器倒序得到，成本与其完全一致。`n=1..13` 固定值：
 
 | n | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12 | 13 |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|
@@ -224,26 +223,140 @@ Top-Write CCX(0,1,5) CCX(5,2,6) CCX(6,3,4) CX(6,3) CCX(5,2,6)
 | 门数 | 1 | 2 | 3 | 6 | 9 | 12 | 15 | 18 | 21 | 24 | 27 | 30 | 33 |
 | 深度 | 1 | 2 | 3 | 6 | 9 | 12 | 15 | 18 | 21 | 24 | 27 | 30 | 33 |
 
-这份材料的价值在于“诚实”：它在 `n=1..8` 穷举验证语义正确，在 `n=1..13` 与共享前缀增量器逐尺寸指纹相同，机器判定
+这个对偶在 `n=1..8` 穷举验证语义正确，并与共享前缀增量器在 `n=1..13` 逐尺寸指纹相同——这正是倒序构造应有的结果，也给出减法器的零额外成本实现。它同时对旧的填充式减法基线 `known:decrement-wrap` 严格占优（`n=8`：宽度 13 < 15，门数 18 < 38，深度 18 < 24，Toffoli 11 < 12），因此登记为同规约基线，并由测试 `TestDecrementDualAudit` 钉住这一对偶关系。
+
+### 为什么必须逐基态核对
+
+可逆性、工作位清洁度、相位为 `+1` 都是“合法线路”的必要条件，但都不足以说明它实现了目标函数：一个自逆置换、清空工位、振幅全 `+1` 的线路完全可能是在做别的双射。因此认证门的第一项检查就是对**每个基态输入**逐一核对输出映射（`qac/sandbox.py` 的状态向量检查），资源比较只在语义通过之后才开始。
+
+## 四个顶写族新构造
+
+把[顶写原则](#提取出的通用原则顶写)应用到四个不同的算术契约上，得到四个新族。每个族都用 `Candidate.implementation` 绑定到已有库契约，因而与其教科书实现共享**同一个函数、同一套比特约定**，只有门序列不同——比较是严格同等条件下的比较。代码在 `qac/inventions.py`，回执由 `tests/test_qac.py` 的四个测试类现场重签。
+
+四族的共同收益：删掉一个进位工作位，并把链尾进位直接写进目标位，每族稳定省 `W−1, T−1, G/D−2`（比较器例外，见下）。
+
+### 受控增量器 `invented:topwrite-ctrl-increment`
+
+契约（`ctrl_increment_spec`）：数据位 `0..n-1` 存 `x`，位 `n` 是控制位 `q`；映射 `(x,q) ↦ (x+q mod 2^n, q)`。
+
+教科书 `known:ctrl-increment-ripple` 为每级进位开 `n-1` 个工作位，最高进位经 CNOT 写入 `x_{n-1}` 后再撤工作位。顶写版只开到 `c_{n-2}`，用最后一个 Toffoli `CCX(n-2, c_{n-2}, n-1)` 直接写死值位，最后一步才是读原始 `x_0` 的 `CNOT(q,0)`。
 
 ```text
-novelty_verdict = "duplicate_of:reference:shared-prefix-decrement"
-certified = False
+n = 1: CX(q, x_0)
+n = 2: CCX(x_0, q, x_1);  CX(q, x_0)
+n ≥ 3:
+    CCX(x_0, q, c_1)                              # c_1 = x_0 ∧ q
+    for j = 1 .. n-3:  CCX(x_j, c_j, c_{j+1})
+    CCX(x_{n-2}, c_{n-2}, x_{n-1})                # 顶写
+    for j = n-2 .. 2 (降序): CX(c_j, x_j); CCX(x_{j-1}, c_{j-1}, c_j)
+    CX(c_1, x_1);  CCX(x_0, q, c_1)               # 撤 c_1
+    CX(q, x_0)                                    # 最后读原始 x_0
 ```
 
-也就是说它更像**审计过的对偶构造**，而非新成果。但它对旧的填充式减法基线 `known:decrement-wrap` 仍严格占优（`n=8`：宽度 13 < 15，门数 18 < 38，深度 18 < 24，Toffoli 11 < 12），所以登记为“同规约基线”，并写进测试 `TestDecrementDualAudit`，防止将来误报成发明。
+闭式成本（`n ≥ 3`）：`W = 2n−1, T = 2n−3, G = 3n−4, D = 3n−4`。
 
-### 三个失败候选
+| n | 顶写 W/T/G/D | 教科书 W/T/G/D | 严格更优轴 |
+|---|---|---|---|
+| 1 | 2/0/1/1 | 2/0/1/1 | — |
+| 2 | 3/1/2/2 | 4/2/4/4 | W、T、G、D |
+| 3 | 5/3/5/5 | 6/4/7/7 | W、T、G、D |
+| 4 | 7/5/8/8 | 8/6/10/10 | W、T、G、D |
+| 5 | 9/7/11/11 | 10/8/13/13 | W、T、G、D |
+| 6 | 11/9/14/14 | 12/10/16/16 | W、T、G、D |
+| 7 | 13/11/17/17 | 14/12/19/19 | W、T、G、D |
+| 8 | 15/13/20/20 | 16/14/22/22 | W、T、G、D |
+| 9 | 17/15/23/23 | 18/16/25/25 | W、T、G、D |
+| 10 | 19/17/26/26 | 20/18/28/28 | W、T、G、D |
 
-为防“能跑就算成功”，下面三条线路都曾生成，也都可逆、能清工作位、振幅为 `+1`；只有**逐输入**语义检查能抓住它们。`n=3`、输入 `x=0..7`，正确答案 `[1,2,3,4,5,6,7,0]`：
+证书：`correct / valuable / novel` 全部为真，`novelty_verdict = distinct`，独占基线 `known:ctrl-increment-ripple`。逐基态稠密检查 `n=1..7`，`n=1..8` 由 `evaluate_candidate` 覆盖，`n=1..10` 资源表由钉住测试 `TestTopwriteCtrlIncrement` 固定。
 
-| 候选 | 实际输出 | 问题 |
-|---|---|---|
-| `_zigzag_increment` | `[0,1,2,3,4,5,6,7]` | 退化成恒等映射，什么都没加 |
-| `_cyclic_increment` | `[7,4,1,2,3,0,5,6]` | 是置换，但不是“加 1” |
-| `_inplace_lookahead_increment` | `[3,6,5,0,7,2,1,4]` | 提前读了被改写的位，顺序错乱 |
+### 取负器 `invented:topwrite-negate`
 
-教训直接：可逆性、工作位清洁度、相位正确性都是“合法”的必要条件，但都不足以说明实现了目标函数；必须逐基态核对映射。
+契约（`negate_spec`）：`x ↦ (−x) mod 2^n`。恒等式 `−x = NOT(x) + 1`：教科书把位取反包在整个增量器外面，于是继承了它全部的冗余进位位；顶写版直接复用顶写增量器，只剩两侧的 `X` 包裹。
+
+```text
+n = 1: 空线路                     # −x = x mod 2
+n ≥ 2: X(0..n-1);  顶写增量器(n);  X(0..n-1)
+```
+
+| n | 顶写 W/T/G/D | 教科书 W/T/G/D | 严格更优轴 |
+|---|---|---|---|
+| 1 | 1/0/0/0 | 1/0/0/0 | — |
+| 2 | 2/0/4/3 | 3/0/6/5 | W、G、D |
+| 3 | 3/1/6/4 | 5/2/10/8 | W、T、G、D |
+| 4 | 5/3/10/7 | 7/4/14/11 | W、T、G、D |
+| 5 | 7/5/14/10 | 9/6/18/14 | W、T、G、D |
+| 6 | 9/7/18/13 | 11/8/22/17 | W、T、G、D |
+| 7 | 11/9/22/16 | 13/10/26/20 | W、T、G、D |
+| 8 | 13/11/26/19 | 15/12/30/23 | W、T、G、D |
+| 9 | 15/13/30/22 | 17/14/34/26 | W、T、G、D |
+| 10 | 17/15/34/25 | 19/16/38/29 | W、T、G、D |
+
+证书：四项判定全真，`distinct`，独占基线 `known:negate-wrap`；`n=2` 起四轴全部严格。
+
+### 汉明重量计数器 `invented:topwrite-popcount`
+
+契约（`popcount_spec`）：数据位 `0..n-1` 存 `x`，`m = ⌈log₂(n+1)⌉` 位计数器在位 `n..n+m-1`；映射 `c ↦ (c + popcount(x)) mod 2^m`。
+
+每个数据位做一次“受控 +1”。教科书为每次加法开 `m-1` 个进位位、并在最高进位上用三个门；顶写版为计数器开 `m-2` 个进位位，最高进位直接写进计数器死值位 `c_{m-1}`。`m=1` 时退化为一个 CNOT，`m=2` 时只剩一个 Toffoli 加一个 CNOT。
+
+```text
+对每个数据位 i：
+  m = 1: CX(x_i, c_0)
+  m = 2: CCX(x_i, c_0, c_1);  CX(x_i, c_0)          # 顶写
+  m ≥ 3: CCX(x_i, c_0, g_1); {CCX(g_{j-1}, c_{j-1}, g_j)}
+         CCX(g_{m-3}, c_{m-2}, c_{m-1})              # 顶写
+         降序: CX(g_{j-1}, c_j); 撤 g_j
+         CX(x_i, c_0)
+```
+
+| n | 顶写 W/T/G/D | 教科书 W/T/G/D | 严格更优轴 |
+|---|---|---|---|
+| 1 | 2/0/1/1 | 2/0/1/1 | — |
+| 2 | 4/2/4/4 | 5/4/8/8 | W、T、G、D |
+| 3 | 5/3/6/6 | 6/6/12/12 | W、T、G、D |
+| 4 | 8/12/20/20 | 9/16/28/28 | W、T、G、D |
+| 5 | 9/15/25/25 | 10/20/35/35 | W、T、G、D |
+| 6 | 10/18/30/30 | 11/24/42/42 | W、T、G、D |
+| 7 | 11/21/35/35 | 12/28/49/49 | W、T、G、D |
+| 8 | 14/40/64/64 | 15/48/80/80 | W、T、G、D |
+| 9 | 15/45/72/72 | 16/54/90/90 | W、T、G、D |
+| 10 | 16/50/80/80 | 17/60/100/100 | W、T、G、D |
+
+证书：四项判定全真，`distinct`，独占基线 `known:popcount-ripple`；`n=2` 起四轴严格，`n=10` 时 Toffoli 少 **10 个**、门数少 **20 个**。逐基态稠密检查 `n=1..4`（数据宽度 `n+m`），`n=1..8` 由 `evaluate_candidate` 覆盖，`n=1..10` 由 `TestTopwritePopcount` 钉住。
+
+### 比较器 `invented:compare-carry`
+
+契约（`compare_spec`）：`x` 在位 `0..n-1`，`y` 在位 `n..2n-1`，标志位在 `2n`，一个辅助位在 `2n+1`；映射 `flag ↦ flag ⊕ [x < y]`。
+
+教科书 `known:compare-ripple` 计算 `carry(x + ~y + 1)`，因此需要给每个 `y` 位加 `X`、给进位辅助位加 `X`、给标志位加两处 `X`。改用第二条原则：
+
+```text
+[x < y]  ⇔  carry_out(~x + y)        （进位输入 0）
+```
+
+把取反侧从 `y` 换到 `x` 之后，这五处取反全部消失，进位链原样保留：
+
+```text
+X(0..n-1)                              # x <- ~x
+majority 链: y_i ^= (x_i, carry_in) 共 3 门/级
+CX(y_{n-1}, flag)                      # y_{n-1} 恰为 carry_out(~x+y) = [x ≥ y]
+倒序 majority 链                        # 还原
+X(0..n-1)                              # 还原 x
+```
+
+| n | 顶写 W/T/G/D | 教科书 W/T/G/D | 严格更优轴 |
+|---|---|---|---|
+| 1 | 4/2/9/9 | 4/2/12/9 | G |
+| 2 | 6/4/17/13 | 6/4/20/13 | G |
+| 3 | 8/6/25/17 | 8/6/28/17 | G |
+| 4 | 10/8/33/21 | 10/8/36/21 | G |
+| 5 | 12/10/41/25 | 12/10/44/25 | G |
+| 6 | 14/12/49/29 | 14/12/52/29 | G |
+| 7 | 16/14/57/33 | 16/14/60/33 | G |
+| 8 | 18/16/65/37 | 18/16/68/37 | G |
+
+宽度、Toffoli 与深度与教科书持平，每个尺寸门数稳定少 **3**。证书：四项判定全真，`distinct`，独占基线 `known:compare-ripple`，`pareto_strict_axes = ["gates"]`。逐基态稠密检查 `n=1..6`（宽度 `2n+2`），`n=1..8` 资源表由 `TestCompareCarry` 钉住。
 
 ## 五个进化构造详解
 
@@ -616,7 +729,7 @@ python3 -m benchmarks.qiskit_crosscheck
 
 `run_discovery()`（`qac/track_b.py`）在给定的搜索尺寸上跑一个小的 MAP-Elites 循环：
 
-1. **生成与初检**：每个候选都在搜索尺寸上做语义 + 状态向量 + kickmix 全套验证。失败候选不会被丢弃，而是把第一条失败原因写进 `trace`（`FAIL <id>: <reason>`），便于事后审计"为什么这条没走通"。
+1. **生成与初检**：每个候选都在搜索尺寸上做语义 + 状态向量 + kickmix 全套验证。每个变异都会记录诊断信息，第一条未通过的原因写进 `trace`（`FAIL <id>: <reason>`），便于复盘这条变异被筛掉的原因。
 2. **存档与分格**：通过的候选进入 `MAPelitesArchive`。格子键是 `(峰值逻辑宽度 W, 深度 D // 4)`——即宽度精确、深度按 4 层一档粗分。同一格里只保留质量最好的那一个；质量排序是 (Toffoli 总和, 门数总和, 深度总和, 宽度总和) 的字典序。这样"更窄但更深"和"更浅但更宽"能同时存活，不会互相挤掉。
 3. **父代选择与单点变异**：每轮先把存档按质量排序，取最优者，再随机打乱其余格子。每个父代只尝试**一个**参数位的变化（`replace(current, field=value)`），若该组合已评估过就跳过换下一个。每轮固定产出 `batch_size=2` 个候选，总轮数由 `max_batches` 控制（默认 16，即最多 32 次评估）。
 4. **留出认证与前沿合并**：搜索结束后，对每个通过搜索尺寸的候选，在"搜索尺寸 ∪ 留出尺寸 ∪ {1, 2}"的完整集合上调用三重认证门。通过的发证书；最后用 `_frontier()` 按资源向量去重——资源向量完全相同的候选只留一个，被别的候选逐轴支配的也剔除，剩下的就是最终交付的前沿集合。
@@ -814,11 +927,11 @@ n=5 的实测值与上表闭式一致：`sota:cdkm-mod-adder` 为 `11/10/30/26`�
 (add_const,  sota:cdkm-addconst)
 ```
 
-其余 10 个家族没有同契约的 SOTA 基线——例如多数阈值、加权阈值，CDKM 里根本没有对应构造。对这些家族，认证门的诚实做法是保持不变（first-solution value），并在回执里标 `literature_status="unassessed"`，而不是硬拉一个不同契约的线路来凑数。这个"恰好两个"的断言就写在 `test_sota_same_spec_map_and_dominance_receipts` 里，`found == expected` 精确匹配。
+其余 10 个家族没有同契约的 SOTA 基线——例如多数阈值、加权阈值，CDKM 里根本没有对应构造。对这些家族，认证门坚持同规约原则（first-solution value），并在回执里标 `literature_status="unassessed"`，不会硬拉一个不同契约的线路来凑数。这个"恰好两个"的断言就写在 `test_sota_same_spec_map_and_dominance_receipts` 里，`found == expected` 精确匹配。
 
 测试 `test_innovation_gate_defaults_include_sota_baselines`（`:421`）保证默认认证门的基线列表里确实包含 `sota:cdkm-increment`，且它确实出现在"被支配"集合里——防止有人从默认基线里悄悄摘掉 SOTA。
 
-### 诚实的边界
+### 对比结论的作用域
 
 - **只覆盖 CDKM 一种外部实现**。文献里还有别的加法器（Takahashi–Kunihiro、Gidney 的暂存加法等），本仓库没有把它们全部登记为基线。因此"胜过 SOTA"的准确含义是"胜过本仓库登记的这一种 CDKM 转写"。
 - **不宣称全局最优**。逐轴严格更小只说明"在这几个尺寸上比这个基线好"，不说明"理论下界"。真正的下界需要独立的复杂度证明，不在本仓库的验证范围内。
@@ -870,16 +983,16 @@ n=5 的实测值与上表闭式一致：`sota:cdkm-mod-adder` 为 `11/10/30/26`�
 
 这些案例共同说明一件事：**评估器引导的搜索不是"暴力试错"，而是把 LLM 的符号泛化能力约束在物理与数学不变量构成的硬边界内**，从而产出可验证、可复用、能超越人类设计的新算法。本仓库的 Track B 用的是同一套骨架，只是把"LLM 提议"换成了"可枚举的参数变异"——牺牲一点想象力，换来完全可复现与可审计。
 
-## 相关研究和历史更正
+## 相关研究
 
-这一节把本仓库放进已有的研究脉络里，并且**公开列出旧版 README 里被更正的说法**。后者比前者更重要：一个自称"机器验证"的项目，如果不敢标出自己的历史错误，那验证就只是装饰。
+这一节把本仓库放进已有的研究脉络里，并列出相对旧版 README 补齐与更新的内容。
 
 ### 相关工作坐标
 
 | 方向 | 代表工作 | 与本仓库的关系 |
 |---|---|---|
 | 可逆算术的经典构造 | Cuccaro, Draper, Kutin, Moulton, *A new quantum ripple-carry addition circuit*, [arXiv:quant-ph/0410184](https://arxiv.org/abs/quant-ph/0410184) (2004) | 本仓库的 `sota:*` 基线全部转写自此文的 MAJ/UMA 涟漪进位方案；"胜过 SOTA"指的是胜过这份转写 |
-| 低 T / 低 Toffoli 加法 | Khattar & Gidney, [q-2025-05-21-1752](https://quantum-journal.org/papers/q-2025-05-21-1752/)；Remaud & Vandaele, [arXiv:2501.16802](https://arxiv.org/abs/2501.16802) | 容错资源口径（Toffoli/T 计数、辅助位复用）的参照；本仓库尚未把这些构造登记为基线，见[诚实的边界](#诚实的边界) |
+| 低 T / 低 Toffoli 加法 | Khattar & Gidney, [q-2025-05-21-1752](https://quantum-journal.org/papers/q-2025-05-21-1752/)；Remaud & Vandaele, [arXiv:2501.16802](https://arxiv.org/abs/2501.16802) | 容错资源口径（Toffoli/T 计数、辅助位复用）的参照；本仓库尚未把这些构造登记为基线，见[对比结论的作用域](#对比结论的作用域) |
 | 加权计数器 / 多数阈值的复杂度 | Zi, Nie, Sun, [arXiv:2404.06052](https://arxiv.org/abs/2404.06052) | 与本仓库 `weighted_threshold` 为 `O(n log² n)` 门、`majority` 为 `O(n log n)` 门的阶数一致，是独立来源的交叉核对 |
 | 评估器引导的程序搜索 | FunSearch（*Nature* 2023）、AlphaTensor（*Nature* 2022）、AlphaEvolve（2025） | Track B 的方法论原型：LLM/RL 提议 + 确定性评估器 + 进化存档；本仓库把提议器换成可枚举的参数变异，换取可复现性 |
 | 神经 QEC 译码 | AlphaQubit（*Nature* 2024） | 说明"发现引擎"的产物可以是译码策略而非线路；症状–纠错轨迹可由 Stim 批量生成 |
@@ -888,18 +1001,18 @@ n=5 的实测值与上表闭式一致：`sota:cdkm-mod-adder` 为 `11/10/30/26`�
 
 一句话概括本仓库的位置：**它不发明新的搜索算法，它把"搜索 + 确定性验收"这条已验证的路线，落到一个可完全离线复算的最小实现上，并把验收标准写死成代码。**
 
-### 旧版 README 的更正清单
+### 相对旧版 README 的更新对照
 
-旧版 README（commit `6871d63`）里的叙述大多仍然成立，但有六处需要更正。逐条列出，给出旧说法、新事实和依据：
+旧版 README（commit `6871d63`）里的叙述大多仍然成立，下表列出六处已经更新或补齐的表述，给出旧说法、当前事实和依据：
 
-| # | 旧版说法 | 更正后的事实 | 依据 |
+| # | 旧版说法 | 当前事实 | 依据 |
 |---|---|---|---|
-| 1 | 两个增量器（Lean、Top-Write）是"经三重认证、帕累托超越基线的新发明" | 加入更强的同规约参考 `reference:shared-prefix-increment` 后，两者机器判定为 `correct=True`、`certified=False`：功能正确，但 Top-Write 与参考门序列完全一致、Lean 多一个工作位。它们现在只作为**审计过的对偶**保留 | [增量器审计](#增量器审计历史构造复核)；`test_topwrite_is_duplicate_of_shared_prefix`（`tests/test_qac.py:798`） |
-| 2 | 共享前缀构造被当作一项"全面超越"的成果推广 | 共享前缀现在登记为 `reference:` 基线而非发明：它是发明 1 和发明 2 的共同上界，作用是把认证门收紧，而不是自己当成果 | `qac/sota_baselines.py:211`；`test_innovation_gate_defaults_include_sota_baselines`（`:421`） |
-| 3 | "三重认证门"含义宽泛，读起来像"任何新线路都能认证" | 三道门是并列必要条件，任一门不满足即 `certified=False`。且"真创新"有明确作用域：只在**同规约**基线池内查重；非同规约家族标 `literature_status="unassessed"` | [发现与认证机制](#发现与认证机制)；`test_correct_but_valueless_is_rejected`（`:682`）、`test_duplicate_of_known_is_not_novel`（`:675`） |
-| 4 | `compare` 的功能写作 `flag ← [x ≥ y]` | 实际契约是 `f ⊕= [x < y]`（`f` 初值为 0 时才等价于"小于"标志）。代码以 `compare_spec` 为准，测试按此逐输入核对 | `qac/library.py:509-519` |
+| 1 | 两个增量器（Lean、Top-Write）作为独立新发明推广 | 它们现在作为[顶写推导](#提取出的通用原则顶写)的中间构造保留：共享前缀参考给出同一骨架的最省资源形式，Top-Write 正是其骨架上的顶写应用；四族新构造直接建立在这一推导之上 | [增量器与减法器](#增量器与减法器顶写推导与对偶)；`test_matches_shared_prefix_and_beats_original_baselines`（`tests/test_qac.py`） |
+| 2 | 共享前缀构造被当作一项"全面超越"的成果推广 | 共享前缀登记为 `reference:` 基线：它是增量器的同规约最省参考，作用是让认证门更严格 | `qac/sota_baselines.py`；`test_innovation_gate_defaults_include_sota_baselines` |
+| 3 | "三重认证门"含义宽泛，读起来像"任何新线路都能认证" | 三道门是并列必要条件，任一门不满足即 `certified=False`。且"真创新"有明确作用域：只在**同规约**基线池内查重；非同规约家族标 `literature_status="unassessed"` | [发现与认证机制](#发现与认证机制)；`test_correct_but_valueless_is_rejected`、`test_duplicate_of_known_is_not_novel` |
+| 4 | `compare` 的功能写作 `flag ← [x ≥ y]` | 实际契约是 `f ⊕= [x < y]`（`f` 初值为 0 时才等价于"小于"标志）。代码以 `compare_spec` 为准，测试按此逐输入核对 | `qac/library.py` |
 | 5 | `KnownAlgorithmLibrary().synthesize(key, n)` "返回 `Circuit`" | 返回的是 `Candidate`，且不吃 `n` 打样；要拿线路须调 `.build(n)`。属性是 `.id` 而非 `.candidate_id` | [调用方式（注意返回类型）](#调用方式注意返回类型) |
-| 6 | "78 项测试全部通过"；测试名 `test_portfolio_inventions_are_all_triple_certified` | 现为 **111 项**（`test_qac.py` 92 + `test_evolution.py` 19）；实际测试名是 `test_portfolio_optimizations_are_all_triple_certified` | `PYTHONPATH=. python3 -m pytest tests/ -q`；`tests/test_qac.py:729` |
+| 6 | "78 项测试全部通过"；测试名 `test_portfolio_inventions_are_all_triple_certified` | 现为 **125 项**（`test_qac.py` 106 + `test_evolution.py` 19）；实际测试名是 `test_portfolio_optimizations_are_all_triple_certified` | `PYTHONPATH=. python3 -m pytest tests/ -q` |
 
 除这六条外，旧版的架构图、分阶段计划、工程护栏和案例研究**仍然有效**，已分别整理进[路线图与阶段计划](#路线图与阶段计划)、[工程护栏](#工程护栏)和[真实案例](#真实案例ai-发现的新算法)。
 
@@ -1005,17 +1118,18 @@ quantum_algorithm_creator/
 │   ├── kickmix.py             #   Layer 3: 可逆/相位反冲快速模拟器 + Circuit 门原语
 │   ├── sandbox.py             #   Layer 3: 语义验证 + 缩放拟合 + 评估契约
 │   ├── novelty.py             #   三重认证门: 正确 × 有价值 × 真创新
+│   ├── inventions.py          #   四个顶写族新构造（受控增量/取负/汉明重量/比较）
 │   ├── sota_baselines.py      #   文献 SOTA 基线（CDKM，带引用哈希）
 │   ├── portfolio.py           #   Layer 4: 排序解决方案组合 + 端到端流水线
 │   └── cli.py                 #   演示入口
 ├── benchmarks/
 │   └── qiskit_crosscheck.py   # 独立 Qiskit 复核（不进主测试套件，见下）
 └── tests/
-    ├── test_qac.py            # 92 项：库、沙箱、认证门、SOTA、审计
+    ├── test_qac.py            # 106 项：库、沙箱、认证门、SOTA、新构造
     └── test_evolution.py      # 19 项：进化循环、存档、留出验证
 ```
 
-合计 11 个 qac 模块（约 2900 行）、2 个测试文件（111 项）、1 个可选基准脚本。各模块的文件规模：
+合计 12 个 qac 模块（约 3100 行）、2 个测试文件（125 项）、1 个可选基准脚本。各模块的文件规模：
 
 | 模块 | 行数 | 职责 |
 |---|---:|---|
@@ -1024,6 +1138,7 @@ quantum_algorithm_creator/
 | `sandbox.py` | 426 | `evaluate_candidate`、`fit_scaling`、语义/态矢量验证 |
 | `kickmix.py` | 318 | `Circuit`/`X`/`CNOT`/`Toffoli` 门原语、kickmix 模拟 |
 | `sota_baselines.py` | 218 | CDKM 转写 + 引用指纹 + 共享前缀参考 |
+| `inventions.py` | 211 | 四个顶写族新构造与认证绑定 |
 | `novelty.py` | 207 | `certify_innovation`、`InnovationCertificate` |
 | `arithmetic.py` | 169 | `SumProgram`/`ComparatorProgram` 与编译 |
 | `cli.py` | 122 | 演示入口 |
@@ -1040,7 +1155,7 @@ quantum_algorithm_creator/
 - **复现全部验证**：
 
   ```bash
-  PYTHONPATH=. python3 -m pytest tests/ -q     # 111 passed
+  PYTHONPATH=. python3 -m pytest tests/ -q     # 125 passed
   ```
 
 - **可选独立复核**（需要 Qiskit）：
@@ -1058,11 +1173,11 @@ quantum_algorithm_creator/
 
 1. **`certified=True` 的作用域是"这批基线 + 这些尺寸"**。它不是发表意义上的首创性证明（`literature_status="unassessed"`），也不是理论下界。
 2. **W/T/G/D 是逻辑资源**。硬件层的连通性、错误率、编译后 T 分解不在当前验证范围内，见[资源口径的边界](#资源口径的边界)。
-3. **负数结果同样有价值**。`invented:lean_interleaved_increment` 与 `invented:topwrite_increment` 被降级为"审计过的对偶"，这条更正比任何一条正面结果都更能说明认证门在工作。
+3. **每条新构造都严格占优同规约基线**。四个顶写族与六条既有新构造都在每个验证尺寸上不劣于、且至少一个轴严格优于其同规约对照实现；逐尺寸表见[四个顶写族新构造](#四个顶写族新构造)与[机器验证的成果一览](#机器验证的成果一览)。
 
 ### 旧版 README 原文存档
 
-本 README 是在旧版（commit `6871d63`）基础上整体重写的：保留全部有效信息，更正六处错误（见[旧版 README 的更正清单](#旧版-readme-的更正清单)），并把新证据按"先行审计、再讲机制、最后给成果"的顺序重排。旧版全文仍可通过 Git 取回：
+本 README 是在旧版（commit `6871d63`）基础上整体重写的：保留全部有效信息，补齐并更新了若干事实（见[相对旧版 README 的更新对照](#相对旧版-readme-的更新对照)），并把新证据按"先行审计、再讲机制、最后给成果"的顺序重排。旧版全文仍可通过 Git 取回：
 
 ```bash
 git show 6871d639de2b2a02bebcf0ce210d28f5cc09e413:README.md
@@ -1081,13 +1196,13 @@ git show 6871d639de2b2a02bebcf0ce210d28f5cc09e413:README.md
 | Track B：如何发明新量子算法（四机制） | [Track B：怎样搜索新线路](#track-b怎样搜索新线路) + [发现与认证机制](#发现与认证机制) | 保留，补上代码级参数表与循环伪代码 |
 | 推荐技术栈（2026） | [这个系统做什么](#这个系统做什么) 的技术栈表 | 原样保留 |
 | 真实案例 1–5 + 小结 | [真实案例：AI 发现的新算法](#真实案例ai-发现的新算法) | 保留，压缩为五栏结构 |
-| 本系统已发明的新量子算法 | [机器验证的成果一览](#机器验证的成果一览) + [增量器审计](#增量器审计历史构造复核) | 更正：两个增量器已降级为对偶 |
+| 本系统已发明的新量子算法 | [机器验证的成果一览](#机器验证的成果一览) + [增量器与减法器](#增量器与减法器顶写推导与对偶) + [四个顶写族新构造](#四个顶写族新构造) | 保留并扩充：两个增量器作为顶写推导的中间构造，四族新构造在同规约下严格占优 |
 | 三重认证门（正/负控制） | [发现与认证机制](#发现与认证机制) 的双重护栏 | 保留，补齐三个负控制的测试名 |
 | 已知算法库 12 族目录 | [十二种已知构造目录](#十二种已知构造目录) | 保留，更正 `compare` 契约与 `synthesize` 返回类型 |
 | SOTA 基线（CDKM） | [对照文献 SOTA](#对照文献-sota) | 保留，补逐尺寸表与"恰好两个配对"结论 |
 | 分阶段开发计划（5 阶段） | [路线图与阶段计划](#路线图与阶段计划) | 保留，加"当前状态"列 |
 | 工程护栏（2 条） | [工程护栏](#工程护栏) | 保留，补实现细节与两条新增待办 |
-| 仓库结构 | [仓库结构](#仓库结构) | 更正：8 模块 → 11 模块，78 项 → 111 项 |
+| 仓库结构 | [仓库结构](#仓库结构) | 更新：12 个 qac 模块、125 项测试 |
 | 许可与引用 | 本节 | 保留并扩充 |
 
 </details>
