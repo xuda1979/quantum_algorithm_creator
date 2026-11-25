@@ -6,9 +6,9 @@
 2. **搜索**同一功能下更省资源的参数化线路（Track B）；
 3. 用**确定性机器检查**判断某条线路是否“正确、有价值、结构上新”（三重条件），只有全部通过才允许称为一项成果。
 
-所有结论都由代码现场跑出来，不靠口头声明。当前实现是纯 Python 标准库 + numpy，测试共 **135 项**（`tests/test_qac.py` 116 项 + `tests/test_evolution.py` 19 项），全部通过。
+所有结论都由代码现场跑出来，不靠口头声明。当前实现是纯 Python 标准库 + numpy，测试共 **140 项**（`tests/test_qac.py` 121 项 + `tests/test_evolution.py` 19 项），全部通过。
 
-**本轮结果。** 在 12 个同规约基线之上，机器认证了 **14 条新构造**：多数阈值、加权阈值、定值比较（进化版 `optimized:less_than:1-0` 与可直接调用的手推版 `invented:less_than`，两者逐尺寸资源完全相同）、常数加法，四个“顶写族”——受控增量器、取负器、汉明重量计数器、比较器（见[四个顶写族新构造](#四个顶写族新构造)），以及新的精简模加法器 `invented:modadd-lean`（同规约战胜 CDKM 基线，见[模加法器](#模加法器-inventedmodadd-lean)）。在 `n=10` 的加权阈值任务上，低位优先构造把 Toffoli 数从同门集固定宽度基线的 **227** 降到 **93**，逻辑深度从 **336** 降到 **146**，宽度为 **21**。每个新族都在每个验证尺寸上严格占优其同规约教科书实现。
+**本轮结果。** 在 12 个同规约基线之上，机器认证了 **15 条新构造**：多数阈值、加权阈值、定值比较（进化版 `optimized:less_than:1-0` 与可直接调用的手推版 `invented:less_than`，两者逐尺寸资源完全相同）、常数加法，四个“顶写族”——受控增量器、取负器、汉明重量计数器、比较器（比较器有两个递进构造：先 `invented:compare-carry`，再 `invented:compare-topcarry`，后者把最高位进位直接折进标志位，见[四个顶写族新构造](#四个顶写族新构造)），以及新的精简模加法器 `invented:modadd-lean`（同规约战胜 CDKM 基线，见[模加法器](#模加法器-inventedmodadd-lean)）。在 `n=10` 的加权阈值任务上，低位优先构造把 Toffoli 数从同门集固定宽度基线的 **227** 降到 **93**，逻辑深度从 **336** 降到 **146**，宽度为 **21**。每个新族都在每个验证尺寸上严格占优其同规约教科书实现。
 
 ## 目录
 
@@ -41,7 +41,7 @@ python3 -m qac.cli audit --sizes 1,2,3,4,5,6,7,8     # 复核两种历史增量�
 python3 -m qac.cli search majority --seed 7 --holdout 6,7,8,10
 python3 -m qac.cli search weighted_threshold --seed 7 --holdout 6,7,8,10
 python3 -m qac.cli search less_than --seed 7 --holdout 6,7,8,10
-python3 -m pytest tests/ -q                          # 135 项测试
+python3 -m pytest tests/ -q                          # 140 项测试
 ```
 
 可选的真实 Qiskit 交叉复核（独立虚拟环境即可）：
@@ -123,6 +123,7 @@ flowchart TD
 | `invented:topwrite-negate` | 取负 `x → (−x) mod 2^n` | certified | `known:negate-wrap` | W、T、G、D |
 | `invented:topwrite-popcount` | 汉明重量计数 `c → (c + popcount(x)) mod 2^m` | certified | `known:popcount-ripple` | W、T、G、D |
 | `invented:compare-carry` | 比较 `flag ^= [x < y]` | certified | `known:compare-ripple` | G（W/T/D 持平） |
+| `invented:compare-topcarry` | 比较 `flag ^= [x < y]`（最高位进位直接折进标志） | certified | `known:compare-ripple` | T、G、D（W 持平） |
 | `invented:modadd-lean` | 模加法 `(a,b) → (a, a+b mod 2^n)` | certified | `sota:cdkm-mod-adder` | W、T、G、D |
 
 每一行的完整逐尺寸资源表都在[四个顶写族新构造](#四个顶写族新构造)与[五个进化构造详解](#五个进化构造详解)中，认证回执由 `qac/inventions.py` 与 `tests/test_qac.py` 现场签发。
@@ -361,6 +362,43 @@ X(0..n-1)                              # 还原 x
 | 10 | 22/20/81/45 | 22/20/84/45 | G |
 
 宽度、Toffoli 与深度与教科书持平，每个尺寸门数稳定少 **3**。证书：四项判定全真，`distinct`，独占基线 `known:compare-ripple`，`pareto_strict_axes = ["gates"]`。逐基态稠密检查 `n=1..6`（宽度 `2n+2`），`n=1..10` 资源表由 `TestCompareCarry` 钉住。
+
+### 比较器（进阶）`invented:compare-topcarry`
+
+上一版仍把进位链走满 `n−1` 级，最后用 `CX(y_{n-1}, flag)` 读出“进位”结果位。进阶版换一个角度：**最高位的那次进位根本不必被写出来**。把三输入多数函数改写成“异或 + 掩码”形式
+
+```text
+maj(c, x', y)  =  x'  ⊕  (x' ⊕ y)(x' ⊕ c)
+```
+
+于是最后一级可在链上原位完成：先 `CX(x', y)` 让 `y` 暂存 `x' ⊕ y`，再让 `flag` 吸收 `x'` 与三输入多数，最后两次 `CX(x', ·)` 原位还原。整条链只跑 `i = 0..n−2` 并在这一段内倒序，`c_n` 从不落地。
+
+```text
+X(0..n-1)                                    # x <- ~x
+maj 链仅到 i = n-2                            # c_{n-1} 是最后一个工作位
+CX(x_{n-1}, y_{n-1});  CX(x_{n-1}, c_{n-1});  CX(x_{n-1}, flag)
+CCX(y_{n-1}, c_{n-1}, flag)                  # flag ^= maj(c_{n-1}, ~x_{n-1}, y_{n-1})
+CX(x_{n-1}, c_{n-1});  CX(x_{n-1}, y_{n-1})   # 原位还原
+倒序 maj 链（只在 i = 0..n-2）
+X(0..n-1)                                    # 还原 x
+```
+
+与上一版相比，链尾少一整级“写进位 + 读进位 + 撤进位”，稳定省 `T−1, G−1, D−1`；与教科书相比省 `T−1, G−4, D−1`。闭式成本 `W = 2n+2, T = 2n−1, G = 8n, D = 4n+4`。
+
+| n | 进阶顶写 W/T/G/D | 教科书 W/T/G/D | 上一版 W/T/G/D | 严格更优轴 |
+|---|---|---|---|---|
+| 1 | 4/1/8/8 | 4/2/12/9 | 4/2/9/9 | T、G、D |
+| 2 | 6/3/16/12 | 6/4/20/13 | 6/4/17/13 | T、G、D |
+| 3 | 8/5/24/16 | 8/6/28/17 | 8/6/25/17 | T、G、D |
+| 4 | 10/7/32/20 | 10/8/36/21 | 10/8/33/21 | T、G、D |
+| 5 | 12/9/40/24 | 12/10/44/25 | 12/10/41/25 | T、G、D |
+| 6 | 14/11/48/28 | 14/12/52/29 | 14/12/49/29 | T、G、D |
+| 7 | 16/13/56/32 | 16/14/60/33 | 16/14/57/33 | T、G、D |
+| 8 | 18/15/64/36 | 18/16/68/37 | 18/16/65/37 | T、G、D |
+| 9 | 20/17/72/40 | 20/18/76/41 | 20/18/73/41 | T、G、D |
+| 10 | 22/19/80/44 | 22/20/84/45 | 22/20/81/45 | T、G、D |
+
+证书：四项判定全真，`distinct`，独占基线 `known:compare-ripple`，`pareto_strict_axes = ["depth", "gates", "toffoli"]`（宽度持平）。逐基态稠密检查 `n=1..6`（宽度 `2n+2`，稠密上限 14 比特），`n=1..10` 资源表与“同时不劣于教科书和上一版”的断言由 `TestCompareTopcarry` 钉住。
 
 ### 模加法器 `invented:modadd-lean`
 
@@ -1074,7 +1112,7 @@ n=5 的实测值与上表闭式一致：`sota:cdkm-mod-adder` 为 `11/10/30/26`�
 | 3 | "三重认证门"含义宽泛，读起来像"任何新线路都能认证" | 三道门是并列必要条件，任一门不满足即 `certified=False`。且"真创新"有明确作用域：只在**同规约**基线池内查重；非同规约家族标 `literature_status="unassessed"` | [发现与认证机制](#发现与认证机制)；`test_correct_but_valueless_is_rejected`、`test_duplicate_of_known_is_not_novel` |
 | 4 | `compare` 的功能写作 `flag ← [x ≥ y]` | 实际契约是 `f ⊕= [x < y]`（`f` 初值为 0 时才等价于"小于"标志）。代码以 `compare_spec` 为准，测试按此逐输入核对 | `qac/library.py` |
 | 5 | `KnownAlgorithmLibrary().synthesize(key, n)` "返回 `Circuit`" | 返回的是 `Candidate`，且不吃 `n` 打样；要拿线路须调 `.build(n)`。属性是 `.id` 而非 `.candidate_id` | [调用方式（注意返回类型）](#调用方式注意返回类型) |
-| 6 | "78 项测试全部通过"；测试名 `test_portfolio_inventions_are_all_triple_certified` | 现为 **135 项**（`test_qac.py` 116 + `test_evolution.py` 19）；实际测试名是 `test_portfolio_optimizations_are_all_triple_certified` | `PYTHONPATH=. python3 -m pytest tests/ -q` |
+| 6 | "78 项测试全部通过"；测试名 `test_portfolio_inventions_are_all_triple_certified` | 现为 **140 项**（`test_qac.py` 121 + `test_evolution.py` 19）；实际测试名是 `test_portfolio_optimizations_are_all_triple_certified` | `PYTHONPATH=. python3 -m pytest tests/ -q` |
 
 除这六条外，旧版的架构图、分阶段计划、工程护栏和案例研究**仍然有效**，已分别整理进[路线图与阶段计划](#路线图与阶段计划)、[工程护栏](#工程护栏)和[真实案例](#真实案例ai-发现的新算法)。
 
@@ -1180,18 +1218,18 @@ quantum_algorithm_creator/
 │   ├── kickmix.py             #   Layer 3: 可逆/相位反冲快速模拟器 + Circuit 门原语
 │   ├── sandbox.py             #   Layer 3: 语义验证 + 缩放拟合 + 评估契约
 │   ├── novelty.py             #   三重认证门: 正确 × 有价值 × 真创新
-│   ├── inventions.py          #   四个顶写族新构造 + 手推定值比较（末级直写/标志融合）
+│   ├── inventions.py          #   四个顶写族新构造（比较器含两版）+ 手推定值比较（末级直写/标志融合）
 │   ├── sota_baselines.py      #   文献 SOTA 基线（CDKM，带引用哈希）
 │   ├── portfolio.py           #   Layer 4: 排序解决方案组合 + 端到端流水线
 │   └── cli.py                 #   演示入口
 ├── benchmarks/
 │   └── qiskit_crosscheck.py   # 独立 Qiskit 复核（不进主测试套件，见下）
 └── tests/
-    ├── test_qac.py            # 116 项：库、沙箱、认证门、SOTA、新构造
+    ├── test_qac.py            # 121 项：库、沙箱、认证门、SOTA、新构造
     └── test_evolution.py      # 19 项：进化循环、存档、留出验证
 ```
 
-合计 12 个 qac 模块（约 3300 行）、2 个测试文件（135 项）、1 个可选基准脚本。各模块的文件规模：
+合计 12 个 qac 模块（约 3400 行）、2 个测试文件（140 项）、1 个可选基准脚本。各模块的文件规模：
 
 | 模块 | 行数 | 职责 |
 |---|---:|---|
@@ -1200,7 +1238,7 @@ quantum_algorithm_creator/
 | `sandbox.py` | 426 | `evaluate_candidate`、`fit_scaling`、语义/态矢量验证 |
 | `kickmix.py` | 318 | `Circuit`/`X`/`CNOT`/`Toffoli` 门原语、kickmix 模拟 |
 | `sota_baselines.py` | 218 | CDKM 转写 + 引用指纹 + 共享前缀参考 |
-| `inventions.py` | 378 | 四个顶写族新构造 + 手推定值比较 `invented:less_than` + 认证绑定 |
+| `inventions.py` | 431 | 四个顶写族新构造（比较器含 `compare-carry` / `compare-topcarry` 两版）+ 手推定值比较 `invented:less_than` + 认证绑定 |
 | `novelty.py` | 207 | `certify_innovation`、`InnovationCertificate` |
 | `arithmetic.py` | 169 | `SumProgram`/`ComparatorProgram` 与编译 |
 | `cli.py` | 122 | 演示入口 |
@@ -1217,7 +1255,7 @@ quantum_algorithm_creator/
 - **复现全部验证**：
 
   ```bash
-  PYTHONPATH=. python3 -m pytest tests/ -q     # 135 passed
+  PYTHONPATH=. python3 -m pytest tests/ -q     # 140 passed
   ```
 
 - **可选独立复核**（需要 Qiskit）：
@@ -1264,7 +1302,7 @@ git show 6871d639de2b2a02bebcf0ce210d28f5cc09e413:README.md
 | SOTA 基线（CDKM） | [对照文献 SOTA](#对照文献-sota) | 保留，补逐尺寸表与"恰好两个配对"结论 |
 | 分阶段开发计划（5 阶段） | [路线图与阶段计划](#路线图与阶段计划) | 保留，加"当前状态"列 |
 | 工程护栏（2 条） | [工程护栏](#工程护栏) | 保留，补实现细节与两条新增待办 |
-| 仓库结构 | [仓库结构](#仓库结构) | 更新：12 个 qac 模块、135 项测试 |
+| 仓库结构 | [仓库结构](#仓库结构) | 更新：12 个 qac 模块、140 项测试 |
 | 许可与引用 | 本节 | 保留并扩充 |
 
 </details>

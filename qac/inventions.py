@@ -34,6 +34,7 @@ __all__ = [
     "topwrite_negate",
     "topwrite_popcount",
     "compare_carry",
+    "compare_topcarry",
     "lessthan_fused",
     "lessthan_fused_candidate",
     "lean_mod_adder",
@@ -328,6 +329,56 @@ def lean_mod_adder_candidate() -> Candidate:
 
 
 # ---------------------------------------------------------------------------
+# 7. Comparator: flag-directed top carry — the final carry is never a wire.
+# ---------------------------------------------------------------------------
+
+def compare_topcarry(n: int) -> Circuit:
+    """Comparator whose most significant carry is folded straight into the flag.
+
+    Contract (``compare_spec``): x = bits 0..n-1, y = bits n..2n-1, flag = bit
+    2n, one ancilla = bit 2n+1. Map: flag ^= [x < y].
+
+    Same carry chain as ``invented:compare-carry`` (complement x, then run
+    ``carry(~x + y)``), but the chain stops one step short. The last carry
+    ``c_n`` is the one nobody needs *stored*: only its parity reaches the flag.
+    Using the mux identity
+
+        maj(c, x', y) = x' ^ (x' ^ y)(x' ^ c)
+
+    the top step can therefore consume ``c_{n-1}`` in place and flip the flag
+    with a single Toffoli plus two CNOT fix-ups, on wires the chain already
+    owns. No top carry slot is written, so the reversal skips that level too.
+
+    Savings against ``invented:compare-carry`` (same width, same layout):
+    T -1 and G -1 at every size, plus depth -1. Against the textbook
+    ``known:compare-ripple``: T -1, G -4, D -1 at every size.
+
+    Cost: W = 2n + 2, T = 2n - 1, G = 8n, D = 4n + 4.
+
+    Verified exhaustively on all 2^(2n+1) inputs for n = 1..6 (width 14 at
+    n = 6 is the sandbox dense limit); cost formula pinned to n = 10.
+    """
+    flag = 2 * n
+    anc = flag + 1                      # c_0 slot, |0> in and out
+    c = Circuit(2 * n + 2)
+    g: list = [X(i) for i in range(n)]
+    chain: list = []                    # c_{i+1} written into y_i, i = 0..n-2
+    for i in range(n - 1):
+        ci = anc if i == 0 else (n + i - 1)
+        chain += [CNOT(n + i, i), CNOT(n + i, ci), Toffoli(ci, i, n + i)]
+    g += chain
+    # Top step: flag ^= maj(c_{n-1}, ~x_{n-1}, y_{n-1}) with no carry written.
+    xt, yt = n - 1, 2 * n - 1
+    ct = anc if n == 1 else 2 * n - 2
+    g += [CNOT(xt, yt), CNOT(xt, ct), CNOT(xt, flag),
+          Toffoli(yt, ct, flag), CNOT(xt, ct), CNOT(xt, yt)]
+    g += list(reversed(chain))
+    g += [X(i) for i in range(n)]
+    c.gates = g
+    return c
+
+
+# ---------------------------------------------------------------------------
 # Registry: problem key -> (candidate_id, builder, pinned sizes for verification)
 # ---------------------------------------------------------------------------
 
@@ -357,6 +408,8 @@ def inventions() -> dict[str, list[tuple[Candidate, tuple[int, ...]]]]:
         ],
         "compare": [
             (_bind("compare", "invented:compare-carry", compare_carry),
+             (1, 2, 3, 4, 5, 6)),
+            (_bind("compare", "invented:compare-topcarry", compare_topcarry),
              (1, 2, 3, 4, 5, 6)),
         ],
         "less_than": [

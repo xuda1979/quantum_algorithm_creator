@@ -51,7 +51,7 @@ from qac.novelty import (
 from qac.library import increment_candidate_ancilla as _inc_cand
 from qac.inventions import (
     inventions, sota_inventions, topwrite_ctrl_increment, topwrite_negate,
-    topwrite_popcount, compare_carry, lean_mod_adder, lessthan_fused,
+    topwrite_popcount, compare_carry, compare_topcarry, lean_mod_adder, lessthan_fused,
 )
 from qac.library import (
     ctrl_increment_spec, negate_spec, compare_spec, popcount_spec, popcount_m,
@@ -1111,6 +1111,67 @@ class TestCompareCarry:
         assert cert.novelty_verdict == "distinct"
         assert cert.pareto_strict_axes == ["gates"]
         assert cert.dominated_baselines == ["known:compare-ripple"]
+
+
+class TestCompareTopcarry:
+    """Comparator with the top carry folded straight into the flag (mux identity).
+
+    maj(c, ~x, y) = ~x ^ (~x^y)(~x^c), so the final carry need never be stored:
+    the chain stops at c_{n-1}, is reversed one level less, and the flag picks
+    up its parity in six gates on wires the chain already owns.
+    """
+
+    PINNED = {
+        1: (4, 1, 8, 8), 2: (6, 3, 16, 12), 3: (8, 5, 24, 16), 4: (10, 7, 32, 20),
+        5: (12, 9, 40, 24), 6: (14, 11, 48, 28), 7: (16, 13, 56, 32),
+        8: (18, 15, 64, 36), 9: (20, 17, 72, 40), 10: (22, 19, 80, 44),
+    }
+
+    def test_exhaustive_semantics_n1_to_6(self):
+        # Dense statevector over x, y and the flag; width 2n+2 = 14 at n = 6 is
+        # the sandbox dense limit.
+        for n in range(1, 7):
+            rep = check_semantics(compare_topcarry(n), compare_spec(n), 2 * n + 1)
+            assert rep.ok, (n, rep.reasons[:3])
+
+    def test_cost_formula_pinned(self):
+        for n in range(1, 11):
+            r = _resources(compare_topcarry(n))
+            got = (r["width"], r["toffoli"], r["gates"], r["depth"])
+            assert got == (2 * n + 2, 2 * n - 1, 8 * n, 4 * n + 4), (n, got)
+            assert got == self.PINNED[n], (n, got, self.PINNED[n])
+
+    def test_dominates_textbook_and_previous_invention_every_size(self):
+        known = KnownAlgorithmLibrary().synthesize("compare", 1).build
+        for n in range(1, 11):
+            a = _resources(compare_topcarry(n))
+            ka = (a["width"], a["toffoli"], a["gates"], a["depth"])
+            for rival in (known(n), compare_carry(n)):
+                b = _resources(rival)
+                kb = (b["width"], b["toffoli"], b["gates"], b["depth"])
+                assert all(p <= q for p, q in zip(ka, kb)), (n, ka, kb)
+
+    def test_triple_certified_three_axes_strict(self):
+        cand = inventions()["compare"][1][0]
+        assert cand.id == "invented:compare-topcarry"
+        rep = evaluate_candidate(cand, sizes=tuple(range(1, 7)))
+        assert rep.passed, rep.failure_reasons
+        cert = certify_innovation(cand, report=rep, extended_sizes=tuple(range(1, 7)))
+        assert cert.certified, cert.reasons
+        assert cert.correct and cert.valuable and cert.novel
+        assert cert.novelty_verdict == "distinct"
+        assert cert.pareto_strict_axes == ["depth", "gates", "toffoli"]
+        assert cert.dominated_baselines == ["known:compare-ripple"]
+
+    def test_registry_binding_matches_compare_contract(self):
+        cand, sizes = inventions()["compare"][1]
+        assert sizes == (1, 2, 3, 4, 5, 6)
+        assert cand.id == "invented:compare-topcarry"
+        # Same contract as the textbook family: identical ground truth and layout.
+        for n in (2, 3, 4):
+            assert cand.spec(n) == compare_spec(n)
+            assert cand.n_data(n) == 2 * n + 1
+            assert cand.ancilla(n) == [2 * n + 1]
 
 
 class TestLessthanFused:
