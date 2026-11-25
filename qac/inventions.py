@@ -26,6 +26,7 @@ from __future__ import annotations
 
 from .kickmix import CNOT, Circuit, Toffoli, X
 from .library import Candidate, KnownAlgorithmLibrary, popcount_m
+from .sota_baselines import _maj, _uma, mod_adder_spec
 from .track_b import _topwrite_increment
 
 __all__ = [
@@ -33,7 +34,10 @@ __all__ = [
     "topwrite_negate",
     "topwrite_popcount",
     "compare_carry",
+    "lean_mod_adder",
+    "lean_mod_adder_candidate",
     "inventions",
+    "sota_inventions",
 ]
 
 
@@ -177,6 +181,58 @@ def compare_carry(n: int) -> Circuit:
 
 
 # ---------------------------------------------------------------------------
+# 5. Modular adder: (a, b) -> (a, a + b mod 2^n) on the CDKM contract.
+# ---------------------------------------------------------------------------
+
+def lean_mod_adder(n: int) -> Circuit:
+    """CDKM in-place modular adder with both provable trims applied.
+
+    Contract (``mod_adder_spec``): data bits 0..n-1 hold a, bits n..2n-1 hold b;
+    map (a, b) -> (a, a + b mod 2^n). Same layout as ``sota:cdkm-mod-adder``
+    (a[i] = i, b[i] = n + i, helper = 2n), so the comparison is apples to apples.
+
+    Two savings that leave semantics untouched:
+
+    1. **Zero-helper tail.** The final UMA acts on (a_0, b_0, h), and by the time
+       its last gate runs the helper has already been returned to |0| by the
+       MAJ/UMA pair. The closing ``CNOT(z, y)`` therefore flips a qubit that is
+       provably 0 — deleting it is exact, not approximate. Saves one CNOT per
+       size at every n.
+
+    2. **Helper-free n = 1.** One-bit modular addition is ``b_0 ^= a_0``: a single
+       CNOT, no carry at all. Width 2, Toffoli 0, gates 1 instead of 3/2/6.
+
+    Cost (n >= 2): W = 2n + 1, T = 2n, G = 6n - 1, D = 5n. Dominates the CDKM
+    baseline strictly on width (n = 1), gates and depth at every size.
+    """
+    if n == 1:
+        return Circuit(2, [CNOT(0, 1)])
+    a = lambda i: i
+    b = lambda i: n + i
+    h = 2 * n
+    gates: list = []
+    gates += _maj(a(0), b(0), h)
+    for i in range(n - 1):
+        gates += _maj(a(i + 1), b(i + 1), a(i))
+    for i in reversed(range(n - 1)):
+        gates += _uma(a(i + 1), b(i + 1), a(i))
+    gates += _uma(a(0), b(0), h)[:-1]  # drop the provably no-op final CNOT
+    return Circuit(2 * n + 1, gates)
+
+
+def lean_mod_adder_candidate() -> Candidate:
+    """Standalone candidate against ``mod_adder_spec`` (no library family exists)."""
+    return Candidate(
+        "invented:modadd-lean",
+        "A",
+        lean_mod_adder,
+        mod_adder_spec,
+        lambda n: 2 * n,
+        lambda n: [2 * n] if n > 1 else [],
+    )
+
+
+# ---------------------------------------------------------------------------
 # Registry: problem key -> (candidate_id, builder, pinned sizes for verification)
 # ---------------------------------------------------------------------------
 
@@ -209,3 +265,15 @@ def inventions() -> dict[str, list[tuple[Candidate, tuple[int, ...]]]]:
              (1, 2, 3, 4, 5, 6)),
         ],
     }
+
+
+def sota_inventions() -> list[tuple[Candidate, tuple[int, ...]]]:
+    """Inventions whose only same-contract baseline lives in ``sota_baselines``.
+
+    There is no ``mod_adder`` family in the known-algorithm library, so these
+    are compared against the CDKM baseline directly (the certificate picks it up
+    through ``sota_baselines()``).
+    """
+    return [
+        (lean_mod_adder_candidate(), (1, 2, 3, 4, 5, 6)),
+    ]

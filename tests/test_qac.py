@@ -50,8 +50,8 @@ from qac.novelty import (
 )
 from qac.library import increment_candidate_ancilla as _inc_cand
 from qac.inventions import (
-    inventions, topwrite_ctrl_increment, topwrite_negate,
-    topwrite_popcount, compare_carry,
+    inventions, sota_inventions, topwrite_ctrl_increment, topwrite_negate,
+    topwrite_popcount, compare_carry, lean_mod_adder,
 )
 from qac.library import (
     ctrl_increment_spec, negate_spec, compare_spec, popcount_spec, popcount_m,
@@ -1110,3 +1110,52 @@ class TestCompareCarry:
         assert cert.novelty_verdict == "distinct"
         assert cert.pareto_strict_axes == ["gates"]
         assert cert.dominated_baselines == ["known:compare-ripple"]
+
+
+# ===========================================================================
+# Layer 2A invention — lean CDKM mod-adder (no library family exists)
+# ===========================================================================
+
+class TestLeanModAdder:
+    """(a, b) -> (a, a + b mod 2^n) with two exact trims over CDKM."""
+
+    # Machine-measured costs (n -> width, toffoli, gates, depth).
+    PINNED = {
+        1: (2, 0, 1, 1), 2: (5, 4, 11, 10), 3: (7, 6, 17, 15),
+        4: (9, 8, 23, 20), 5: (11, 10, 29, 25), 6: (13, 12, 35, 30),
+        7: (15, 14, 41, 35), 8: (17, 16, 47, 40), 9: (19, 18, 53, 45),
+        10: (21, 20, 59, 50),
+    }
+
+    def test_exhaustive_semantics_n1_to_6(self):
+        # n = 7 needs width 2n+1 = 15, past the dense statevector cap of 14.
+        for n in range(1, 7):
+            rep = check_semantics(lean_mod_adder(n), mod_adder_spec(n), 2 * n)
+            assert rep.ok, (n, rep.reasons[:3])
+
+    def test_cost_formulas_pinned(self):
+        for n, want in self.PINNED.items():
+            r = _resources(lean_mod_adder(n))
+            got = (r["width"], r["toffoli"], r["gates"], r["depth"])
+            assert got == want, (n, got, want)
+
+    def test_savings_against_cdkm_baseline(self):
+        for n in range(2, 11):
+            lean, base = lean_mod_adder(n), build_cuccaro_mod_adder(n)
+            assert lean.n <= base.n
+            assert lean.toffoli_count() <= base.toffoli_count()
+            assert lean.gate_count() == base.gate_count() - 1   # zero-helper tail
+            assert lean.depth() == base.depth() - 1
+        assert lean_mod_adder(1).n == 2          # helper-free n = 1
+        assert lean_mod_adder(1).gate_count() == 1
+
+    def test_triple_certified_all_four_axes_strict(self):
+        cand = sota_inventions()[0][0]
+        rep = evaluate_candidate(cand, sizes=tuple(range(1, 7)))
+        assert rep.passed, rep.failure_reasons
+        cert = certify_innovation(cand, report=rep, extended_sizes=tuple(range(1, 7)))
+        assert cert.certified, cert.reasons
+        assert cert.correct and cert.valuable and cert.novel
+        assert cert.novelty_verdict == "distinct"
+        assert cert.pareto_strict_axes == ["depth", "gates", "toffoli", "width"]
+        assert cert.dominated_baselines == ["sota:cdkm-mod-adder"]
