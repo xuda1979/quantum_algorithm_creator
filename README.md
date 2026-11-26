@@ -6,9 +6,9 @@
 2. **搜索**同一功能下更省资源的参数化线路（Track B）；
 3. 用**确定性机器检查**判断某条线路是否“正确、有价值、结构上新”（三重条件），只有全部通过才允许称为一项成果。
 
-所有结论都由代码现场跑出来，不靠口头声明。当前实现是纯 Python 标准库 + numpy，测试共 **158 项**（`tests/test_qac.py` 139 项 + `tests/test_evolution.py` 19 项），全部通过。
+所有结论都由代码现场跑出来，不靠口头声明。当前实现是纯 Python 标准库 + numpy，测试共 **165 项**（`tests/test_qac.py` 146 项 + `tests/test_evolution.py` 19 项），全部通过。
 
-**本轮结果。** 在 12 个同规约基线之上，机器认证了 **18 条新构造**：多数阈值、加权阈值、定值比较（进化版 `optimized:less_than:1-0` 与可直接调用的手推版 `invented:less_than`，两者逐尺寸资源完全相同）、常数加法，四个“顶写族”——受控增量器、取负器、汉明重量计数器、比较器（比较器有两个递进构造：先 `invented:compare-carry`，再 `invented:compare-topcarry`，后者把最高位进位直接折进标志位，见[四个顶写族新构造](#四个顶写族新构造)），精简模加法器 `invented:modadd-lean`（同规约战胜 CDKM 基线，见[模加法器](#模加法器-inventedmodadd-lean)），以及多数器与加权阈值各一条“可达性剪枝”新构造（可证明恒为零的进位级被直接删除，见[多数阈值剪枝计数器](#多数阈值剪枝计数器-inventedmajority-pruned) 与 [加权阈值剪枝累加器](#加权阈值剪枝累加器-inventedweighted-pruned)）。在 `n=10` 的加权阈值任务上，剪枝累加器把 Toffoli 从教科书基线的 **262** 降到 **127**、从调优固定宽度基线的 **227** 降到 **127**，逻辑深度从 **387 / 336** 降到 **188**，宽度为 **21**；在同一尺寸的多数阈值任务上，剪枝计数器把 Toffoli 从教科书基线的 **126** 降到 **63**、从调优固定宽度基线的 **105** 降到 **63**（见上方对比表）。每个新族都在每个验证尺寸上严格占优其同规约教科书实现。
+**本轮结果。** 在 13 个同规约基线之上，机器认证了 **19 条新构造**：多数阈值、加权阈值、定值比较（进化版 `optimized:less_than:1-0` 与可直接调用的手推版 `invented:less_than`，两者逐尺寸资源完全相同）、常数加法，四个“顶写族”——受控增量器、取负器、汉明重量计数器、比较器（比较器有两个递进构造：先 `invented:compare-carry`，再 `invented:compare-topcarry`，后者把最高位进位直接折进标志位，见[四个顶写族新构造](#四个顶写族新构造)），精简模加法器 `invented:modadd-lean`（同规约战胜 CDKM 基线，见[模加法器](#模加法器-inventedmodadd-lean)），多数器与加权阈值各一条“可达性剪枝”新构造（可证明恒为零的进位级被直接删除，见[多数阈值剪枝计数器](#多数阈值剪枝计数器-inventedmajority-pruned) 与 [加权阈值剪枝累加器](#加权阈值剪枝累加器-inventedweighted-pruned)），以及一套全新契约——**汉明距离阈值预言机** `invented:hamming-pruned`（两个寄存器间的距离是否达到纠错半径 `⌈n/2⌉`，见[汉明距离阈值预言机](#汉明距离阈值预言机-inventedhamming-pruned)）。在 `n=10` 的加权阈值任务上，剪枝累加器把 Toffoli 从教科书基线的 **262** 降到 **127**、从调优固定宽度基线的 **227** 降到 **127**，逻辑深度从 **387 / 336** 降到 **188**，宽度为 **21**；在同一尺寸的多数阈值任务上，剪枝计数器把 Toffoli 从教科书基线的 **126** 降到 **63**、从调优固定宽度基线的 **105** 降到 **63**（见上方对比表）。每个新族都在每个验证尺寸上严格占优其同规约教科书实现。
 
 ## 目录
 
@@ -20,12 +20,13 @@
 - [多数阈值剪枝计数器](#多数阈值剪枝计数器-inventedmajority-pruned)
 - [加权阈值剪枝累加器](#加权阈值剪枝累加器-inventedweighted-pruned)
 - [加权阈值·最小项优先](#加权阈值最小项优先-inventedweighted-lowfirst)
+- [汉明距离阈值预言机](#汉明距离阈值预言机-inventedhamming-pruned)
 - [五个进化构造详解](#五个进化构造详解)
 - [常数加法器：顶写融合](#常数加法器顶写融合)
 - [完整逐尺寸实测](#完整逐尺寸实测)
 - [独立 Qiskit 复核](#独立-qiskit-复核)
 - [发现与认证机制](#发现与认证机制)
-- [十二种已知构造目录](#十二种已知构造目录)
+- [十三种已知构造目录](#十三种已知构造目录)
 - [对照文献 SOTA](#对照文献-sota)
 - [真实案例：AI 发现的新算法](#真实案例ai-发现的新算法)
 - [相关研究](#相关研究)
@@ -44,7 +45,7 @@ python3 -m qac.cli audit --sizes 1,2,3,4,5,6,7,8     # 复核两种历史增量�
 python3 -m qac.cli search majority --seed 7 --holdout 6,7,8,10
 python3 -m qac.cli search weighted_threshold --seed 7 --holdout 6,7,8,10
 python3 -m qac.cli search less_than --seed 7 --holdout 6,7,8,10
-python3 -m pytest tests/ -q                          # 158 项测试
+python3 -m pytest tests/ -q                          # 165 项测试
 ```
 
 可选的真实 Qiskit 交叉复核（独立虚拟环境即可）：
@@ -77,7 +78,7 @@ flowchart TD
 | 层 | 当前实现 | 设计目标 |
 | --- | --- | --- |
 | 1. 问题形式化与分诊 | `problem.py` 接收类型化 IR，`portfolio.py` 检查任务类别与键。对“一次性 O(N) QRAM 加载 + 二次查询加速”的组合给出拒绝理由。 | 把现实问题映射成 Ising/HUBO、稀疏线性系统、哈密顿量或预言机，并用经典基线估算端到端交叉点。 |
-| 2A. 已知方案 | `library.py` 提供 12 个参数化构造与规约，`sota_baselines.py` 提供文献参考。 | 检索算法库与文献，合成振幅放大、QPE、QSVT 等模板，后续导出 Qmod 或 Qualtran Bloq。 |
+| 2A. 已知方案 | `library.py` 提供 13 个参数化构造与规约，`sota_baselines.py` 提供文献参考。 | 检索算法库与文献，合成振幅放大、QPE、QSVT 等模板，后续导出 Qmod 或 Qualtran Bloq。 |
 | 2B. 发现与优化 | `track_b.py`、`arithmetic.py` 生成候选并迭代变异，保留谱系与失败轨迹。 | 扩展线路语法、并行评估与受约束的 LLM 提议，探索分支解码、生命周期分析和反算复用。 |
 | 3. 验证与资源 | `sandbox.py`、`kickmix.py` 检查语义、相位和辅助位，`novelty.py` 出具逐尺寸基线回执。 | 增加 Stim 稳定子、张量网络与容错资源模型（T 工厂、码距、物理时空成本）。 |
 | 4. 交付 | `portfolio.py` 返回线路构造器、报告和 `known` / `optimized` 来源标签，`cli.py` 提供复现命令。 | 按硬件预算排序，输出可编译线路、比较曲线和适用约束。 |
@@ -131,6 +132,7 @@ flowchart TD
 | `invented:majority-pruned` | 多数阈值 `flag ^= [popcount(x) ≥ ⌈n/2⌉]`（可达性剪枝计数器） | certified | `known:majority-vote`、`reference:fixed-width-majority` | T、G、D（W 持平） |
 | `invented:weighted-pruned` | 加权阈值 `flag ^= [Σ(i+1)x_i ≥ ⌊n(n+1)/4⌋]`（可达性剪枝累加器） | certified | `known:weighted-threshold`、`reference:fixed-width-weighted` | W、T、G、D |
 | `invented:weighted-lowfirst` | 加权阈值 `flag ^= [Σ(i+1)x_i ≥ ⌊n(n+1)/4⌋]`（剪枝累加器·最小项优先） | certified | `known:weighted-threshold`、`reference:fixed-width-weighted`、`invented:weighted-pruned` | T、G、D（W 持平） |
+| `invented:hamming-pruned` | 汉明距离阈值 `flag ^= [popcount(x⊕y) ≥ ⌈n/2⌉]`（可达性剪枝计数器） | certified | `known:hamming-distance-ripple` | W、T、G、D |
 
 每一行的完整逐尺寸资源表都在[四个顶写族新构造](#四个顶写族新构造)与[五个进化构造详解](#五个进化构造详解)中，认证回执由 `qac/inventions.py` 与 `tests/test_qac.py` 现场签发。
 
@@ -573,6 +575,53 @@ bound = 0
 宽度逐尺寸持平（`compact_circuit` 裁到真实宽度后两者不变），Toffoli、门数、深度从 `n = 3` 起**每个尺寸都严格更少**：`n = 10` 时 Toffoli 从 `127` 降到 `93`（再省 34，相对教科书共省 `169`），深度从 `188` 降到 `146`；`n = 12` 时从 `195` 降到 `153`。证书在同规约基线池里**额外加入上一条构造** `invented:weighted-pruned`，结果仍为四项判定全真、`distinct`，三条基线全部被占优，`pareto_strict_axes = ["depth", "gates", "toffoli"]`（宽度持平）。逐基态稠密检查 `n=1..6`、`n=1..12` 资源表与三基线逐尺寸弱占优由 `TestWeightedLowFirst` 钉住。
 
 **可迁移的洞见。** 可达性剪枝的强度是“上界上涨速度”的函数，而上界上涨速度是求和的**顺序**决定的。在累加器型线路里，顺序是一个免费的自由度：不改契约、不加辅助位、不加门种，仅靠让中间量晚一点变大，就能把可证明恒零的门再多删掉一批。这条经验对任何“独立项逐个并入有界累加器”的线路都成立。
+
+### 汉明距离阈值预言机 `invented:hamming-pruned`
+
+这一条引入一个全新契约，与前面所有构造都不同。
+
+**现实问题。** 容错量子计算的核心子程序之一是**症状权重判定**：给定两段 n 位串 x、y（例如两个码字的对应位，或测量基与理想基），判断它们的汉明距离是否达到纠错半径。这是最小距离 / 症候权重测试，也是流式错误检测里的“汉明半径成员测试”。它和已有的 `popcount`（对单个寄存器计数、计数器可带任意初值）以及 `majority`（单个寄存器的多数）都不是同一个功能。
+
+**契约**（`hamming_distance_spec`）：`x` 在位 `0..n-1`，`y` 在位 `n..2n-1`，标志位在 `2n`；映射
+
+```text
+flag  ↦  flag ⊕ [ popcount(x ⊕ y) ≥ ⌈n/2⌉ ]
+```
+
+阈值取 `K = ⌈n/2⌉`，即“至少半数位不同”就算到达纠错半径。
+
+**教科书基线** `known:hamming-distance-ripple`：先用 n 个 CNOT 把 y 异或进 x 的伴生寄存器，得到一个 n 位不匹配串；再用一个 m 位（`m = ⌈log₂(n+1)⌉`）涟漪计数器把这 n 个不匹配位全宽累加；然后对计数器做常数阈值判断 `flag ^= 计数器最高位进位`；最后倒序跑回累加、并撤销 XOR 层。每次累加都跑满 `m−1` 级进位，与输入无关。
+
+**新构造的两处结构性节省，都可证明、不是试探。**
+
+1. **可达性剪枝。** 计数器从 0 开始，第 `i` 次累加之前它的值不可能超过 `i`（已经加进去的至多 i 个 1）。进位级 `j` 为 1 需要计数器低 `j` 位全为 1、即已经至少 `2^j − 1`。于是 `2^j > i + 1` 时该级进位**在所有基态输入上恒为 0**，对应的 Toffoli 整段删除。第 `i` 次累加只保留 `J = ⌊log₂(i+1)⌋` 级。
+2. **顶写 + 融合标记。** 最高活级进位直接写进它上方的计数位（不占槽位、不反算槽位）；阈值 `threshold_flag(..., fuse=True, polarity=False)` 复用同一段槽位，并把末级进位折成标志位上的单个 Toffoli（`maj(a, 0, c) = a & c`）。整条线路因此**比教科书基线更窄**（不需要额外一列 scratch）。
+
+```text
+xor  = [ CX(i, n+i) for i in 0..n-1 ]              # 把 y 异或进伴生寄存器
+inc  = 逐 i 的剪枝受控累加（只保留 J = floor(log2(i+1)) 级）
+mark = threshold_flag(a_base..a_{m-1}, K, flag, slot, fuse=True, polarity=False)
+线路 = xor + inc + mark + 倒序(inc) + xor
+```
+
+| n | 本构造 W/T/G/D | 教科书 W/T/G/D |
+|---|---|---|
+| 1 | 3/0/3/3 | 3/0/3/3 |
+| 2 | 7/3/13/10 | 9/10/29/25 |
+| 3 | 9/4/17/12 | 11/14/37/29 |
+| 4 | 14/11/31/22 | 15/36/77/65 |
+| 5 | 16/19/45/36 | 17/44/91/81 |
+| 6 | 18/25/57/46 | 19/52/107/95 |
+| 7 | 20/28/65/52 | 21/60/121/105 |
+| 8 | 24/39/85/68 | 25/102/191/171 |
+| 9 | 26/53/111/92 | 27/114/215/195 |
+| 10 | 28/63/129/108 | 29/126/237/215 |
+| 11 | 30/71/141/118 | 31/138/257/231 |
+| 12 | 32/81/159/134 | 33/150/279/251 |
+
+四条轴在每个尺寸上都弱占优，`n ≥ 2` 时四条轴全部严格更优且**宽度更窄**。差距随 `n` 拉大：`n = 8` 时相对教科书省 `T 63、G 106、D 103、W 1`；`n = 12` 时教科书需要 `150` 个 Toffoli，本构造只需 `81`。证书：四项判定全真，`distinct`，独占基线 `known:hamming-distance-ripple`，`pareto_strict_axes = ["depth", "gates", "toffoli", "width"]`。候选线路在 `n=1..4` 上逐基态稠密检查（宽度 `2n+2m+1 ≤ 14`），资源表与对教科书的逐尺寸占优由 `TestHammingDistancePruned` 钉住。
+
+**可迁移的洞见。** 可达性剪枝不只适用于单寄存器计数（第 16 项）和加权求和（第 17、18 项），也适用于**两寄存器距离**这类“先把差算出来再计数”的预言机——只要差寄存器的汉明重量在构造时已知上界、累加顺序已知，就能整段删掉恒零的进位级，同时把阈值折进标志位并免掉额外 scratch 列。这解释了为什么“新增契约 + 删除冗余”比“在旧契约上微调常数”能带来更大幅度的资源下降。
 
 ## 五个进化构造详解
 
@@ -1018,11 +1067,11 @@ python3 -m benchmarks.qiskit_crosscheck
 - **位平面累加**只在 `n ≤ 14` 验证过；更宽时状态向量验算成本超出本仓库的常驻内存预算。
 - **宽度硬上限 128**、**稠密状态向量验算上限 14 位**，都在代码里显式设了闸。
 - **搜索效率没有基准**：本仓库没有做过"进化 vs 纯随机采样"的对照实验，所以不能声称这套变异启发式比随机搜索更省评估次数。它只被验证为"能在这几类问题上走到已认证的结果"，这是更弱、但可核验的声明。
-- **文献新颖性为 `unassessed`**：本仓库只证明"与本仓库登记的 12 种已知构造及 SOTA 基线不重复"，没有承诺"全世界没人发表过"。真正的文献级新颖性需要外部查新，README 不越界宣称。
+- **文献新颖性为 `unassessed`**：本仓库只证明"与本仓库登记的 13 种已知构造及 SOTA 基线不重复"，没有承诺"全世界没人发表过"。真正的文献级新颖性需要外部查新，README 不越界宣称。
 
-## 十二种已知构造目录
+## 十三种已知构造目录
 
-L2A 层（`qac/library.py`）登记了 12 种带有限验证的可逆构造。它们的作用不是"最终的答案"，而是三样东西：可复用的积木、Track B 搜索的起点、以及认证时的同契约基线。每一种都有明确的数据布局、明确的真值函数（`*_spec`）和固定的资源成本。
+L2A 层（`qac/library.py`）登记了 13 种带有限验证的可逆构造。它们的作用不是"最终的答案"，而是三样东西：可复用的积木、Track B 搜索的起点、以及认证时的同契约基线。每一种都有明确的数据布局、明确的真值函数（`*_spec`）和固定的资源成本。
 
 ### 按任务分组的构造
 
@@ -1040,6 +1089,7 @@ L2A 层（`qac/library.py`）登记了 12 种带有限验证的可逆构造。�
 | `popcount` | `known:popcount-ripple` | `c ↦ (c+popcount(x)) mod 2^m`，`m=⌈log2(n+1)⌉` | `popcount_spec` |
 | `weighted_threshold` | `known:weighted-threshold` | `f ⊕= [Σ(i+1)x_i ≥ θ]`，`θ=⌊n(n+1)/4⌋` | `weighted_threshold_spec` |
 | `majority` | `known:majority-vote` | `f ⊕= [popcount(x) ≥ ⌈n/2⌉]` | `majority_spec` |
+| `hamming_distance` | `known:hamming-distance-ripple` | `f ⊕= [popcount(x⊕y) ≥ ⌈n/2⌉]`，两个 n 位数 | `hamming_distance_spec` |
 
 按用途可以粗分成四组：
 
@@ -1088,7 +1138,7 @@ print(cand.id, circuit.n, circuit.toffoli_count())
 
 `Candidate` 上还有 `.spec(n)`（该尺寸的真值映射）、`.n_data(n)`（数据位数）、`.ancilla(n)`（辅助位索引列表）、`.id`（标识）。注意属性是 `.id`，不是 `.candidate_id`。
 
-一次把全部 12 种按统一尺寸扫一遍：
+一次把全部 13 种按统一尺寸扫一遍：
 
 ```python
 reports = lib.verify_all(sizes=range(1, 7))
@@ -1157,7 +1207,7 @@ n=5 的实测值与上表闭式一致：`sota:cdkm-mod-adder` 为 `11/10/30/26`�
 
 ### 只有两类家族和 SOTA 同契约
 
-代码里用机器判定的 `_same_spec` 扫描了全部 12 个家族 × 3 个 SOTA 构造，结果是**恰好两个配对**：
+代码里用机器判定的 `_same_spec` 扫描了全部 13 个家族 × 3 个 SOTA 构造，结果是**恰好两个配对**：
 
 ```
 (increment,  sota:cdkm-increment)
@@ -1249,7 +1299,7 @@ n=5 的实测值与上表闭式一致：`sota:cdkm-mod-adder` 为 `11/10/30/26`�
 | 3 | "三重认证门"含义宽泛，读起来像"任何新线路都能认证" | 三道门是并列必要条件，任一门不满足即 `certified=False`。且"真创新"有明确作用域：只在**同规约**基线池内查重；非同规约家族标 `literature_status="unassessed"` | [发现与认证机制](#发现与认证机制)；`test_correct_but_valueless_is_rejected`、`test_duplicate_of_known_is_not_novel` |
 | 4 | `compare` 的功能写作 `flag ← [x ≥ y]` | 实际契约是 `f ⊕= [x < y]`（`f` 初值为 0 时才等价于"小于"标志）。代码以 `compare_spec` 为准，测试按此逐输入核对 | `qac/library.py` |
 | 5 | `KnownAlgorithmLibrary().synthesize(key, n)` "返回 `Circuit`" | 返回的是 `Candidate`，且不吃 `n` 打样；要拿线路须调 `.build(n)`。属性是 `.id` 而非 `.candidate_id` | [调用方式（注意返回类型）](#调用方式注意返回类型) |
-| 6 | "78 项测试全部通过"；测试名 `test_portfolio_inventions_are_all_triple_certified` | 现为 **158 项**（`test_qac.py` 139 + `test_evolution.py` 19）；实际测试名是 `test_portfolio_optimizations_are_all_triple_certified` | `PYTHONPATH=. python3 -m pytest tests/ -q` |
+| 6 | "78 项测试全部通过"；测试名 `test_portfolio_inventions_are_all_triple_certified` | 现为 **165 项**（`test_qac.py` 146 + `test_evolution.py` 19）；实际测试名是 `test_portfolio_optimizations_are_all_triple_certified` | `PYTHONPATH=. python3 -m pytest tests/ -q` |
 
 除这六条外，旧版的架构图、分阶段计划、工程护栏和案例研究**仍然有效**，已分别整理进[路线图与阶段计划](#路线图与阶段计划)、[工程护栏](#工程护栏)和[真实案例](#真实案例ai-发现的新算法)。
 
@@ -1262,7 +1312,7 @@ n=5 的实测值与上表闭式一致：`sota:cdkm-mod-adder` 为 `11/10/30/26`�
 | 阶段 | 内容 | 验收标准 | 当前状态 |
 |---|---|---|---|
 | **1. 确定性验证与资源沙箱**（先于一切 LLM 环节） | 封装 Qiskit/Stim/可逆 Kickmix 模拟器的沙箱执行框架；暴露严格类型化的评估工具（单位性、辅助比特干净标志、精确 Toffoli/T/双比特门/峰值比特计数） | 在基准任务上评分确定且亚秒级 | **已实现**：`sandbox.py` + `kickmix.py`，纯 numpy，单次评估毫秒级；`require_poly` 缩放护栏已接入 |
-| **2. Track A 检索与高层功能合成** | 基于量子算法动物园、块编码/QSVT 模板、已验证 Bloq 库构建图检索；单智能体 ReAct 循环合成 Qmod/Qualtran 程序 | 可靠编译教科书与工业级形式化（哈密顿模拟、QPE、QAOA、线性求解器），零辅助比特泄漏 | **雏形**：`library.py` 的 12 族构造目录就是检索底座的微缩版；尚无图检索与 Qmod/Qualtran 导出 |
+| **2. Track A 检索与高层功能合成** | 基于量子算法动物园、块编码/QSVT 模板、已验证 Bloq 库构建图检索；单智能体 ReAct 循环合成 Qmod/Qualtran 程序 | 可靠编译教科书与工业级形式化（哈密顿模拟、QPE、QAOA、线性求解器），零辅助比特泄漏 | **雏形**：`library.py` 的 13 族构造目录就是检索底座的微缩版；尚无图检索与 Qmod/Qualtran 导出 |
 | **3. 问题形式化与经典分诊前端** | 领域规格 → 数学 IR 的前端智能体 + 经典基线（CP-SAT/Gurobi、蒙特卡洛、张量网络）+ **交叉点计算器**（物理量子运行时 vs 经典缩放曲线） | 拒绝或重构"经典算法获胜"的问题，杜绝假阳性量子建议 | **骨架**：`problem.py` 的 `ProblemIR` 与 `portfolio.py` 的分诊能拒绝一类已知陷阱（一次性 QRAM 加载 + 二次加速）；交叉点计算器未实现 |
 | **4. Track B 评估器引导进化发现** | 推理模型嵌入异步 MAP-Elites 岛屿进化循环；分布式并行打分；多尺寸正确性、缩放拟合、Toffoli 数、峰值比特宽度自动评分 | 必要性模式与机会模式均能产出成功活动；给出与基线的帕累托报告 | **缩小版已实现**：`track_b.py` 的同步 MAP-Elites（`batch_size=2`、`max_batches=16`），提议器是参数变异而非 LLM；产出见[成果一览](#机器验证的成果一览) |
 | **5. 库结晶与智能体 RL 闭环** | 帕累托优越的发现自动打包为 Qualtran `Bloq` 注册进 Track A 检索图；成功/失败变异轨迹用于工具增强 RL 微调专用子智能体 | 发现产物可复用；后续任务 token 成本下降、收敛加速 | **未实现**：目前"结晶"只到"写进 `library.py` 的 `_entries` 字典 + 加一条钉住测试" |
@@ -1349,7 +1399,7 @@ quantum_algorithm_creator/
 ├── qac/                       # 参考实现：四层全部可运行
 │   ├── __init__.py
 │   ├── problem.py             #   Layer 1: ProblemIR + 分诊路由
-│   ├── library.py             #   Layer 2A: 12 族已知构造目录（检索底座微缩版）
+│   ├── library.py             #   Layer 2A: 13 族已知构造目录（检索底座微缩版）
 │   ├── arithmetic.py          #   Layer 2B: SumProgram / ComparatorProgram 参数化生成器
 │   ├── track_b.py             #   Layer 2B: MAP-Elites 进化发现引擎
 │   ├── kickmix.py             #   Layer 3: 可逆/相位反冲快速模拟器 + Circuit 门原语
@@ -1362,15 +1412,15 @@ quantum_algorithm_creator/
 ├── benchmarks/
 │   └── qiskit_crosscheck.py   # 独立 Qiskit 复核（不进主测试套件，见下）
 └── tests/
-    ├── test_qac.py            # 139 项：库、沙箱、认证门、SOTA、新构造
+    ├── test_qac.py            # 146 项：库、沙箱、认证门、SOTA、新构造
     └── test_evolution.py      # 19 项：进化循环、存档、留出验证
 ```
 
-合计 12 个 qac 模块（约 3700 行）、2 个测试文件（158 项）、1 个可选基准脚本。各模块的文件规模：
+合计 12 个 qac 模块（约 3700 行）、2 个测试文件（165 项）、1 个可选基准脚本。各模块的文件规模：
 
 | 模块 | 行数 | 职责 |
 |---|---:|---|
-| `library.py` | 806 | 12 族构造 + `KnownAlgorithmLibrary` 检索接口 |
+| `library.py` | 806 | 13 族构造 + `KnownAlgorithmLibrary` 检索接口 |
 | `track_b.py` | 509 | 进化循环、MAP-Elites 存档、留出认证、前沿合并 |
 | `sandbox.py` | 426 | `evaluate_candidate`、`fit_scaling`、语义/态矢量验证 |
 | `kickmix.py` | 318 | `Circuit`/`X`/`CNOT`/`Toffoli` 门原语、kickmix 模拟 |
@@ -1435,11 +1485,11 @@ git show 6871d639de2b2a02bebcf0ce210d28f5cc09e413:README.md
 | 真实案例 1–5 + 小结 | [真实案例：AI 发现的新算法](#真实案例ai-发现的新算法) | 保留，压缩为五栏结构 |
 | 本系统已发明的新量子算法 | [机器验证的成果一览](#机器验证的成果一览) + [增量器与减法器](#增量器与减法器顶写推导与对偶) + [四个顶写族新构造](#四个顶写族新构造) | 保留并扩充：两个增量器作为顶写推导的中间构造，四族新构造在同规约下严格占优 |
 | 三重认证门（正/负控制） | [发现与认证机制](#发现与认证机制) 的双重护栏 | 保留，补齐三个负控制的测试名 |
-| 已知算法库 12 族目录 | [十二种已知构造目录](#十二种已知构造目录) | 保留，更正 `compare` 契约与 `synthesize` 返回类型 |
+| 已知算法库 13 族目录 | [十三种已知构造目录](#十三种已知构造目录) | 保留，更正 `compare` 契约与 `synthesize` 返回类型 |
 | SOTA 基线（CDKM） | [对照文献 SOTA](#对照文献-sota) | 保留，补逐尺寸表与"恰好两个配对"结论 |
 | 分阶段开发计划（5 阶段） | [路线图与阶段计划](#路线图与阶段计划) | 保留，加"当前状态"列 |
 | 工程护栏（2 条） | [工程护栏](#工程护栏) | 保留，补实现细节与两条新增待办 |
-| 仓库结构 | [仓库结构](#仓库结构) | 更新：12 个 qac 模块、158 项测试 |
+| 仓库结构 | [仓库结构](#仓库结构) | 更新：12 个 qac 模块、165 项测试 |
 | 许可与引用 | 本节 | 保留并扩充 |
 
 </details>

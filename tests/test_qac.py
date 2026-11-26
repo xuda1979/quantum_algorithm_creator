@@ -53,10 +53,11 @@ from qac.inventions import (
     inventions, sota_inventions, topwrite_ctrl_increment, topwrite_negate,
     topwrite_popcount, compare_carry, compare_topcarry, lean_mod_adder, lessthan_fused,
     majority_pruned, weighted_pruned, weighted_pruned_lowfirst,
+    hamming_distance_pruned,
 )
 from qac.library import (
     ctrl_increment_spec, negate_spec, compare_spec, popcount_spec, popcount_m,
-    lessthan_spec, majority_spec, weighted_threshold_spec,
+    lessthan_spec, majority_spec, weighted_threshold_spec, hamming_distance_spec,
 )
 from qac.sota_baselines import (
     sota_baselines, CUCCARO_CITATION, CITATION_SHA256,
@@ -1369,6 +1370,84 @@ class TestMajorityPruned:
             assert cand.n_data(n) == n + 1
             built = cand.build(n)
             assert cand.ancilla(n) == list(range(n + 1, built.n))
+
+
+class TestHammingDistancePruned:
+    """flag ^= [popcount(x ^ y) >= ceil(n/2)] with a reachability-pruned counter.
+
+    The reference materialises the mismatch bits, ripples all m-1 counter carry
+    levels for every one of the n increments, and keeps a separate scratch
+    column for the threshold.  The invention keeps only the carry levels that
+    can be nonzero at each step (the counter is at most i before the i-th
+    increment) and folds the flag write into the last live carry, so it wins on
+    width as well as gate count, depth and Toffoli count.
+    """
+
+    PINNED = {
+        1: (3, 0, 3, 3), 2: (7, 3, 13, 10), 3: (9, 4, 17, 12),
+        4: (14, 11, 31, 22), 5: (16, 19, 45, 36), 6: (18, 25, 57, 46),
+        7: (20, 28, 65, 52), 8: (24, 39, 85, 68), 9: (26, 53, 111, 92),
+        10: (28, 63, 129, 108), 11: (30, 71, 141, 118), 12: (32, 81, 159, 134),
+    }
+
+    def test_exhaustive_semantics_n1_to_4(self):
+        # Dense statevector over x, y and the flag; workspace width 14 at n = 4
+        # is the sandbox dense limit.
+        for n in range(1, 5):
+            rep = check_semantics(hamming_distance_pruned(n),
+                                  hamming_distance_spec(n), 2 * n + 1)
+            assert rep.ok, (n, rep.reasons[:3])
+
+    def test_reference_family_semantics_n1_to_3(self):
+        known = KnownAlgorithmLibrary().synthesize("hamming_distance", 1).build
+        for n in range(1, 4):
+            rep = check_semantics(known(n), hamming_distance_spec(n), 2 * n + 1)
+            assert rep.ok, (n, rep.reasons[:3])
+
+    def test_cost_profile_pinned(self):
+        for n in range(1, 13):
+            r = _resources(hamming_distance_pruned(n))
+            got = (r["width"], r["toffoli"], r["gates"], r["depth"])
+            assert got == self.PINNED[n], (n, got, self.PINNED[n])
+
+    def test_dominates_textbook_every_size(self):
+        known = KnownAlgorithmLibrary().synthesize("hamming_distance", 1).build
+        for n in range(1, 13):
+            a = _resources(hamming_distance_pruned(n))
+            b = _resources(known(n))
+            ka = (a["width"], a["toffoli"], a["gates"], a["depth"])
+            kb = (b["width"], b["toffoli"], b["gates"], b["depth"])
+            assert all(p <= q for p, q in zip(ka, kb)), (n, ka, kb)
+            if n >= 2:
+                assert any(p < q for p, q in zip(ka, kb)), (n, ka, kb)
+
+    def test_savings_grow_with_n(self):
+        known = KnownAlgorithmLibrary().synthesize("hamming_distance", 1).build
+        assert hamming_distance_pruned(2).toffoli_count() == known(2).toffoli_count() - 7
+        assert hamming_distance_pruned(8).toffoli_count() == known(8).toffoli_count() - 63
+        assert hamming_distance_pruned(8).gate_count() == known(8).gate_count() - 106
+
+    def test_triple_certified_all_four_axes_strict(self):
+        cand = inventions()["hamming_distance"][0][0]
+        assert cand.id == "invented:hamming-pruned"
+        rep = evaluate_candidate(cand, sizes=tuple(range(1, 5)))
+        assert rep.passed, rep.failure_reasons
+        cert = certify_innovation(cand, report=rep, extended_sizes=tuple(range(1, 7)))
+        assert cert.certified, cert.reasons
+        assert cert.correct and cert.valuable and cert.novel
+        assert cert.novelty_verdict == "distinct"
+        assert cert.pareto_strict_axes == ["depth", "gates", "toffoli", "width"]
+        assert cert.dominated_baselines == ["known:hamming-distance-ripple"]
+
+    def test_registry_binding_matches_hamming_contract(self):
+        cand, sizes = inventions()["hamming_distance"][0]
+        assert sizes == (1, 2, 3, 4)
+        assert cand.id == "invented:hamming-pruned"
+        for n in (1, 2, 3, 4):
+            assert cand.spec(n) == hamming_distance_spec(n)
+            assert cand.n_data(n) == 2 * n + 1
+            built = cand.build(n)
+            assert cand.ancilla(n) == list(range(2 * n + 1, built.n))
 
 
 class TestWeightedPruned:

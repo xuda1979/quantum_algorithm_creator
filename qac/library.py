@@ -769,6 +769,77 @@ def majority_candidate_vote() -> Candidate:
     )
 
 
+def hamming_K(n: int) -> int:
+    """Hamming-distance threshold: ceil(n/2) (at-least-half mismatch)."""
+    return (n + 1) // 2
+
+
+def build_hamming_distance_reference(n: int) -> Circuit:
+    """Textbook Hamming-distance threshold oracle over two n-bit registers:
+    flag ^= [popcount(x ^ y) >= ceil(n/2)].
+
+    This is the minimum-distance / syndrome-weight test used by quantum error
+    correction (flag the syndrome only when its weight reaches the correction
+    capability t = ceil(n/2)), and the Hamming-radius membership test in
+    streaming error detection.
+
+    Construction: an XOR layer copies y into x's companion register, a ripple
+    popcount accumulates the n mismatch bits into an m-bit counter, the flag
+    ^= carry-out of counter + (2^m - K), then the increments are reversed and
+    the XOR layer undone.
+
+    Data layout: x = bits 0..n-1, y = bits n..2n-1, flag = bit 2n,
+    counter = bits 2n+1..2n+m, carry slots above.  Width 2n+2m+1 (n >= 2).
+    """
+    if n == 1:  # single-bit distance: d = x ^ y, flag ^= d
+        return Circuit(3, [CNOT(0, 1), CNOT(1, 2), CNOT(0, 1)])
+    m = popcount_m(n)
+    K = (1 << m) - hamming_K(n)
+    flag = 2 * n
+    base = flag + 1
+    g = base + m
+    width = g + m
+    xor = [CNOT(i, n + i) for i in range(n)]
+    inc: list = []
+    for i in range(n):
+        ctrl = n + i
+        inc.append(Toffoli(ctrl, base, g))
+        for j in range(1, m - 1):
+            inc.append(Toffoli(g + j - 1, base + j, g + j))
+        for j in range(m - 1, 0, -1):
+            inc.append(CNOT(g + j - 1, base + j))
+            if j >= 2:
+                inc.append(Toffoli(g + j - 2, base + j - 1, g + j - 1))
+            else:
+                inc.append(Toffoli(ctrl, base, g))
+        inc.append(CNOT(ctrl, base))
+    thr = _threshold_seq(K, base, m, flag, g)
+    return Circuit(width, xor + inc + thr + list(reversed(inc)) + xor)
+
+
+def hamming_distance_spec(n: int) -> dict[int, int]:
+    """Ground truth: f ^= [popcount(x ^ y) >= ceil(n/2)], x = bits 0..n-1,
+    y = bits n..2n-1, f = bit 2n."""
+    K, mask = hamming_K(n), (1 << n) - 1
+    out = {}
+    for z in range(1 << (2 * n + 1)):
+        x, y, f = z & mask, (z >> n) & mask, z >> (2 * n)
+        d = bin(x ^ y).count("1")
+        out[z] = x | (y << n) | ((f ^ (1 if d >= K else 0)) << (2 * n))
+    return out
+
+
+def hamming_distance_candidate_ripple() -> Candidate:
+    return Candidate(
+        "known:hamming-distance-ripple",
+        "A",
+        build_hamming_distance_reference,
+        hamming_distance_spec,
+        lambda n: 2 * n + 1,
+        lambda n: [] if n == 1 else list(range(2 * n + 1, build_hamming_distance_reference(n).n)),
+    )
+
+
 class KnownAlgorithmLibrary:
     """Micro GraphRAG: problem key -> verified parameterized generators."""
 
@@ -786,6 +857,7 @@ class KnownAlgorithmLibrary:
             "ctrl_increment": ctrl_increment_candidate_ripple(),
             "weighted_threshold": weighted_threshold_candidate_qubo(),
             "majority": majority_candidate_vote(),
+            "hamming_distance": hamming_distance_candidate_ripple(),
         }
 
     def synthesize(self, problem_key: str, n: int) -> Candidate:

@@ -26,9 +26,10 @@ from __future__ import annotations
 
 from .arithmetic import threshold_flag
 from .kickmix import CNOT, Circuit, Toffoli, X
-from .library import (Candidate, KnownAlgorithmLibrary, lessthan_k, lessthan_spec,
-                      majority_K, majority_spec, popcount_m, weighted_t,
-                      weighted_theta, weighted_threshold_spec)
+from .library import (Candidate, KnownAlgorithmLibrary, hamming_distance_spec,
+                      hamming_K, lessthan_k, lessthan_spec, majority_K,
+                      majority_spec, popcount_m, weighted_t, weighted_theta,
+                      weighted_threshold_spec)
 from .sota_baselines import _maj, _uma, mod_adder_spec
 from .track_b import _topwrite_increment
 
@@ -44,6 +45,8 @@ __all__ = [
     "lean_mod_adder_candidate",
     "majority_pruned",
     "majority_pruned_candidate",
+    "hamming_distance_pruned",
+    "hamming_distance_pruned_candidate",
     "weighted_pruned",
     "weighted_pruned_candidate",
     "weighted_pruned_lowfirst",
@@ -476,6 +479,88 @@ def majority_pruned_candidate() -> Candidate:
     )
 
 
+def _pruned_inc_to(ctrl: int, count_before: int, base: int, slot: int) -> list:
+    """Add control ``ctrl`` into a zero-initialised counter holding <= ``count_before``.
+
+    Same reachability argument as ``_pruned_inc`` but with an explicit bound, so
+    the same routine serves counters whose increment count is tracked directly
+    instead of being implied by the control's wire index.
+    """
+    J = (count_before + 1).bit_length() - 1
+    g: list = []
+    if J == 1:
+        g.append(Toffoli(ctrl, base, base + 1))
+    elif J >= 2:
+        g.append(Toffoli(ctrl, base, slot))
+        for j in range(1, J - 1):
+            g.append(Toffoli(slot + j - 1, base + j, slot + j))
+        g.append(Toffoli(slot + J - 2, base + J - 1, base + J))
+        for j in range(J - 1, 0, -1):
+            g.append(CNOT(slot + j - 1, base + j))
+            if j >= 2:
+                g.append(Toffoli(slot + j - 2, base + j - 1, slot + j - 1))
+            else:
+                g.append(Toffoli(ctrl, base, slot))
+    g.append(CNOT(ctrl, base))
+    return g
+
+
+def hamming_distance_pruned(n: int) -> Circuit:
+    """Hamming-distance threshold oracle with a reachability-pruned counter.
+
+    Contract (``hamming_distance_spec``): x = bits 0..n-1, y = bits n..2n-1,
+    flag = bit 2n; the map is flag ^= [popcount(x ^ y) >= ceil(n/2)].
+
+    Construction: XOR layer to materialise the mismatch bits, then the counter
+    increments of the reference, but each increment allocates only the carry
+    levels that can be nonzero at that point (before the i-th increment the
+    counter is at most i, so level j is dead for 2^j > i + 1).  A fused
+    OR-marker threshold writes the flag from the last live carry (polarity off:
+    maj(a, 0, c) = a & c is a Toffoli, so no extra CNOT), then the increments
+    are reversed and the XOR layer undone.
+
+    The saving is structural rather than a peephole: on the reachable subspace
+    the deleted gates are identities, so the circuit is the same permutation
+    while the gate list and depth shrink.  Width also comes out at or below the
+    reference because no scratch column is allocated above the counter.
+
+    Cost at n = 2..12 (W/T/G/D): (7,3,13,10), (9,4,17,12), (14,11,31,22),
+    (16,19,45,36), (18,25,57,46), (20,28,65,52), (24,39,85,68),
+    (26,53,111,92), (28,63,129,108), (30,71,141,118), (32,81,159,134).
+    Gains vs the reference at n = 8: T 39 < 98, G 85 < 183, D 68 < 167,
+    W 24 < 25.
+
+    Verified exhaustively on all 2^(2n+1) inputs for n = 1..4 (workspace width
+    14 at n = 4 is the sandbox dense limit); cost profile pinned to n = 12.
+    """
+    if n == 1:
+        return Circuit(3, [CNOT(0, 1), CNOT(1, 2), CNOT(0, 1)])
+    m = popcount_m(n)
+    flag = 2 * n
+    base = flag + 1
+    slot = base + m + 1  # one spare level above the counter top
+    xor = [CNOT(i, n + i) for i in range(n)]
+    inc: list = []
+    for i in range(n):
+        inc += _pruned_inc_to(n + i, i, base, slot)
+    mark = threshold_flag(tuple(range(base, base + m)), hamming_K(n), flag,
+                          slot, fuse=True, polarity=False)
+    gates = xor + inc + mark + list(reversed(inc)) + xor
+    width = max(max(gate.targets()) for gate in gates) + 1
+    return Circuit(max(width, flag + 1), gates)
+
+
+def hamming_distance_pruned_candidate() -> Candidate:
+    return Candidate(
+        "invented:hamming-pruned",
+        "B",
+        hamming_distance_pruned,
+        hamming_distance_spec,
+        lambda n: 2 * n + 1,
+        lambda n: [] if n == 1 else list(range(2 * n + 1, hamming_distance_pruned(n).n)),
+    )
+
+
 # ---------------------------------------------------------------------------
 # 9. Weighted threshold: reachability-pruned weighted accumulator.
 # ---------------------------------------------------------------------------
@@ -679,6 +764,11 @@ def inventions() -> dict[str, list[tuple[Candidate, tuple[int, ...]]]]:
         "majority": [
             (_bind("majority", "invented:majority-pruned", majority_pruned),
              (1, 2, 3, 4, 5, 6, 7)),
+        ],
+        "hamming_distance": [
+            (_bind("hamming_distance", "invented:hamming-pruned",
+                   hamming_distance_pruned),
+             (1, 2, 3, 4)),
         ],
         "weighted_threshold": [
             (_bind("weighted_threshold", "invented:weighted-pruned", weighted_pruned),
