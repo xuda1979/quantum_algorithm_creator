@@ -26,9 +26,10 @@ from __future__ import annotations
 
 from .arithmetic import threshold_flag
 from .kickmix import CNOT, Circuit, Toffoli, X
-from .library import (Candidate, KnownAlgorithmLibrary, hamming_distance_spec,
-                      hamming_K, lessthan_k, lessthan_spec, majority_K,
-                      majority_spec, popcount_m, weighted_t, weighted_theta,
+from .library import (Candidate, KnownAlgorithmLibrary, band_hi, band_lo,
+                      band_threshold_spec, hamming_distance_spec, hamming_K,
+                      lessthan_k, lessthan_spec, majority_K, majority_spec,
+                      popcount_m, weighted_t, weighted_theta,
                       weighted_threshold_spec)
 from .sota_baselines import _maj, _uma, mod_adder_spec
 from .track_b import _topwrite_increment
@@ -51,6 +52,8 @@ __all__ = [
     "weighted_pruned_candidate",
     "weighted_pruned_lowfirst",
     "weighted_pruned_lowfirst_candidate",
+    "band_pruned",
+    "band_pruned_candidate",
     "inventions",
     "sota_inventions",
 ]
@@ -724,6 +727,76 @@ def weighted_pruned_lowfirst_candidate() -> Candidate:
 
 
 # ---------------------------------------------------------------------------
+# 11. Weighted band oracle: pruned accumulator + smallest-term-first + fused
+#     double-threshold marker.
+# ---------------------------------------------------------------------------
+
+def band_pruned(n: int) -> Circuit:
+    """Weighted-band oracle with a pruned, low-first, fused-marker accumulator.
+
+    Contract (``band_threshold_spec``): x = bits 0..n-1, flag = bit n, and
+    flag ^= [lo <= sum_i (i+1) x_i <= hi] with lo = floor(T/4),
+    hi = floor(3T/4), T = n(n+1)/2.
+
+    Two savings over the textbook ``known:band-threshold-ripple``:
+
+    * **Reachability pruning + smallest-term-first ordering** (identical to
+      ``weighted_pruned_lowfirst``): before each term the accumulator is
+      bounded by the sum of the terms already added, so carry levels above
+      floor(log2(bound_before + 2^p)) are provably zero and deleted; adding
+      the smallest terms first keeps every prefix bound minimal, which deletes
+      the most carry levels.
+
+    * **Fused double-threshold marker**: the band is [s >= lo] XOR [s >= hi+1],
+      two carry-out flips into the same flag. Both threshold steps reuse the
+      same pruned carry region in fused OR-marker mode, so neither needs its
+      own materialised carry or uncompute pair.
+
+    Cost at n = 2..12 (W/T/G/D): (5,1,6,3), (8,12,30,27), (10,11,28,22),
+    (12,18,38,31), (15,35,70,58), (16,66,116,104), (19,74,134,119),
+    (20,88,162,143), (21,100,178,163), (23,134,232,220), (25,164,278,260).
+    At n = 10 the textbook oracle costs (23,270,452,405); this construction is
+    (21,100,178,163) -- strict win on width, Toffolis, gates and depth.
+
+    Verified exhaustively on all 2^(n+1) inputs for n = 1..8; cost profile
+    pinned to n = 12.
+    """
+    t = weighted_t(n)
+    flag, base = n, n + 1
+    slot = base + t
+    terms = sorted(
+        (p, i)
+        for i in range(n)
+        for p in range((i + 1).bit_length())
+        if ((i + 1) >> p) & 1
+    )
+    adds: list = []
+    bound = 0
+    for p, i in terms:
+        adds += _pruned_cadd(i, p, base, slot, t, bound)
+        bound += 1 << p
+    bits = tuple(range(base, base + t))
+    mark = threshold_flag(bits, band_lo(n), flag, slot,
+                          fuse=True, polarity=False)
+    mark += threshold_flag(bits, band_hi(n) + 1, flag, slot,
+                           fuse=True, polarity=False)
+    gates = adds + mark + list(reversed(adds))
+    width = max([q for gate in gates for q in gate.targets()] + [flag]) + 1
+    return Circuit(width, gates)
+
+
+def band_pruned_candidate() -> Candidate:
+    return Candidate(
+        "invented:band-pruned",
+        "B",
+        band_pruned,
+        band_threshold_spec,
+        lambda n: n + 1,
+        lambda n: list(range(n + 1, band_pruned(n).n)),
+    )
+
+
+# ---------------------------------------------------------------------------
 # Registry: problem key -> (candidate_id, builder, pinned sizes for verification)
 # ---------------------------------------------------------------------------
 
@@ -776,6 +849,10 @@ def inventions() -> dict[str, list[tuple[Candidate, tuple[int, ...]]]]:
             (_bind("weighted_threshold", "invented:weighted-lowfirst",
                    weighted_pruned_lowfirst),
              (1, 2, 3, 4, 5, 6)),
+        ],
+        "band_threshold": [
+            (_bind("band_threshold", "invented:band-pruned", band_pruned),
+             (1, 2, 3, 4, 5, 6, 7, 8)),
         ],
     }
 

@@ -53,11 +53,13 @@ from qac.inventions import (
     inventions, sota_inventions, topwrite_ctrl_increment, topwrite_negate,
     topwrite_popcount, compare_carry, compare_topcarry, lean_mod_adder, lessthan_fused,
     majority_pruned, weighted_pruned, weighted_pruned_lowfirst,
-    hamming_distance_pruned,
+    hamming_distance_pruned, band_pruned,
 )
 from qac.library import (
     ctrl_increment_spec, negate_spec, compare_spec, popcount_spec, popcount_m,
     lessthan_spec, majority_spec, weighted_threshold_spec, hamming_distance_spec,
+    band_threshold_spec, band_lo, band_hi, band_total,
+    build_band_threshold_reference, band_threshold_candidate_ripple,
 )
 from qac.sota_baselines import (
     sota_baselines, CUCCARO_CITATION, CITATION_SHA256,
@@ -1601,3 +1603,85 @@ class TestWeightedLowFirst:
             assert cand.n_data(n) == n + 1
             built = cand.build(n)
             assert cand.ancilla(n) == list(range(n + 1, built.n))
+
+
+class TestBandThresholdPruned:
+    """Weighted-band oracle: flag ^= [lo <= sum_i (i+1) x_i <= hi].
+
+    The textbook baseline runs two full-width threshold markers over a
+    full-width ripple accumulator. The invented variant reuses the two proven
+    optimisations -- reachability-pruned, smallest-term-first accumulation and
+    fused OR-marker thresholds -- under the identity
+    [lo <= s <= hi] = [s >= lo] XOR [s >= hi+1], so the whole band costs two
+    fused carry-out flips into one flag with no AND ancilla.
+    """
+
+    PINNED = {
+        1: (3, 0, 4, 3), 2: (5, 1, 6, 3), 3: (8, 12, 30, 27), 4: (10, 11, 28, 22),
+        5: (12, 18, 38, 31), 6: (15, 35, 70, 58), 7: (16, 66, 116, 104),
+        8: (19, 74, 134, 119), 9: (20, 88, 162, 143), 10: (21, 100, 178, 163),
+        11: (23, 134, 232, 220), 12: (25, 164, 278, 260),
+    }
+
+    def test_band_edges(self):
+        for n in range(1, 13):
+            t = n * (n + 1) // 2
+            assert band_total(n) == t
+            assert band_lo(n) == t // 4
+            assert band_hi(n) == (3 * t) // 4
+            assert band_lo(n) <= band_hi(n)
+
+    def test_exhaustive_semantics_n1_to_5(self):
+        # Direct statevector caps at width 14 (n = 6 is width 15); the packed
+        # backend covers n >= 6 in test_all_four_axes_strict_certificate.
+        for n in range(1, 6):
+            rep = check_semantics(band_pruned(n), band_threshold_spec(n), n + 1)
+            assert rep.ok, (n, rep.reasons[:3])
+            assert rep.ancilla_clean, (n, rep.reasons[:3])
+
+    def test_reference_baseline_exhaustive_n1_to_5(self):
+        for n in range(1, 6):
+            rep = check_semantics(build_band_threshold_reference(n),
+                                  band_threshold_spec(n), n + 1)
+            assert rep.ok, (n, rep.reasons[:3])
+
+    def test_cost_profile_pinned(self):
+        for n in range(1, 13):
+            r = _resources(band_pruned(n))
+            got = (r["width"], r["toffoli"], r["gates"], r["depth"])
+            assert got == self.PINNED[n], (n, got, self.PINNED[n])
+
+    def test_dominates_textbook_every_size(self):
+        for n in range(1, 13):
+            a = _resources(band_pruned(n))
+            b = _resources(build_band_threshold_reference(n))
+            assert all(a[ax] <= b[ax] for ax in ("width", "toffoli", "gates", "depth")), (
+                n, a, b)
+            # Strict on gates, Toffolis and depth for every n >= 2.
+            if n >= 2:
+                assert a["toffoli"] < b["toffoli"], n
+                assert a["gates"] < b["gates"], n
+                assert a["depth"] < b["depth"], n
+
+    def test_all_four_axes_strict_certificate(self):
+        cand = inventions()["band_threshold"][0][0]
+        assert cand.id == "invented:band-pruned"
+        rep = evaluate_candidate(cand, sizes=tuple(range(1, 9)))
+        assert rep.passed, rep.failure_reasons
+        cert = certify_innovation(cand, report=rep, extended_sizes=tuple(range(1, 7)))
+        assert cert.certified, cert.reasons
+        assert cert.correct and cert.valuable and cert.novel
+        assert cert.novelty_verdict == "distinct"
+        assert cert.pareto_strict_axes == ["depth", "gates", "toffoli", "width"]
+        assert cert.dominated_baselines == ["known:band-threshold-ripple"]
+
+    def test_registry_binding_matches_band_contract(self):
+        cand, sizes = inventions()["band_threshold"][0]
+        assert sizes == (1, 2, 3, 4, 5, 6, 7, 8)
+        assert cand.id == "invented:band-pruned"
+        for n in (1, 2, 3, 4, 5):
+            assert cand.spec(n) == band_threshold_spec(n)
+            assert cand.n_data(n) == n + 1
+            built = cand.build(n)
+            assert cand.ancilla(n) == list(range(n + 1, built.n))
+        assert band_threshold_candidate_ripple().id == "known:band-threshold-ripple"

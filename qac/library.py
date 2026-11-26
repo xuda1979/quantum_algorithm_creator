@@ -10,6 +10,7 @@ bits are 1.
 
 from __future__ import annotations
 
+from .arithmetic import threshold_flag
 from .kickmix import CNOT, Circuit, SWAP, Toffoli, X, Z
 from .sandbox import evaluate_candidate, VerificationReport
 
@@ -840,6 +841,96 @@ def hamming_distance_candidate_ripple() -> Candidate:
     )
 
 
+# ---------------------------------------------------------------------------
+# Weighted band / window threshold oracle (lo <= sum_i (i+1) x_i <= hi)
+# ---------------------------------------------------------------------------
+
+def band_total(n: int) -> int:
+    """Total weighted sum for weights 1..n: n(n+1)/2."""
+    return n * (n + 1) // 2
+
+
+def band_lo(n: int) -> int:
+    """Lower window edge: the weighted sum band starts at the lower quartile."""
+    return band_total(n) // 4
+
+
+def band_hi(n: int) -> int:
+    """Upper window edge (inclusive): upper quartile of the weighted sum."""
+    return (3 * band_total(n)) // 4
+
+
+def build_band_threshold_reference(n: int) -> Circuit:
+    """Textbook weighted-band oracle: flag ^= [band_lo(n) <= sum_i (i+1) x_i
+    <= band_hi(n)] (the "moderate-load" window used in risk-budget, portfolio
+    cardinality and load-balancing oracles — flag only when the weighted load
+    is inside an admissible band, not merely above a single cut).
+
+    Identity that keeps the construction ancilla-lean: since lo <= hi,
+
+        [lo <= s <= hi] = [s >= lo] XOR [s >= hi + 1].
+
+    Both predicates are carry-outs of a constant add on the t-bit accumulator,
+    so the band is TWO threshold flips into the same flag — no AND ancilla and
+    no compare-equal machinery.
+
+    Construction: serial controlled adds of each weight into a full-width t-bit
+    accumulator (dedicated per-level carry slots, the verified ripple pattern),
+    then flag ^= carry-out of acc + (2^t - lo) and flag ^= carry-out of
+    acc + (2^t - (hi+1)); the two carry-outs fire iff acc >= lo and acc >= hi+1,
+    whose XOR is the band membership. All weighted adds are then reversed to
+    restore the accumulator to 0.
+
+    Data layout: x = bits 0..n-1, flag = bit n, accumulator = bits n+1..n+t,
+    carry slots c_1..c_t = bits n+1+t..n+2t. Width n+2t+1;
+    Toffolis ~ 2*sum_i (t-1-popcount(i+1)) + O(t) per threshold, twice.
+
+    Real-world role: risk-band / VaR-window oracles, portfolio load windows,
+    knapsack feasibility bands (feasible iff inside [lo, hi]).
+    """
+    t = weighted_t(n)
+    flag = n
+    a_base = n + 1
+    carry_base = a_base + t
+    width = carry_base + t
+    adds = [_cadd_pow2_seq(i, p, a_base, t, carry_base)
+            for i in range(n) for p in range(t) if (i + 1) >> p & 1]
+    bits = tuple(range(a_base, a_base + t))
+    gates: list = []
+    for seq in adds:
+        gates += seq
+    gates += threshold_flag(bits, band_lo(n), flag, carry_base,
+                            fuse=False, polarity=False)
+    gates += threshold_flag(bits, band_hi(n) + 1, flag, carry_base,
+                            fuse=False, polarity=False)
+    for seq in reversed(adds):
+        gates += list(reversed(seq))
+    return Circuit(width, gates)
+
+
+def band_threshold_spec(n: int) -> dict[int, int]:
+    """Ground truth: f ^= [lo <= sum_i (i+1) x_i <= hi], x = bits 0..n-1,
+    f = bit n."""
+    lo, hi = band_lo(n), band_hi(n)
+    out = {}
+    for z in range(1 << (n + 1)):
+        x, f = z & ((1 << n) - 1), z >> n
+        s = sum((i + 1) * ((x >> i) & 1) for i in range(n))
+        out[z] = x | ((f ^ (1 if lo <= s <= hi else 0)) << n)
+    return out
+
+
+def band_threshold_candidate_ripple() -> Candidate:
+    return Candidate(
+        "known:band-threshold-ripple",
+        "A",
+        build_band_threshold_reference,
+        band_threshold_spec,
+        lambda n: n + 1,
+        lambda n: list(range(n + 1, build_band_threshold_reference(n).n)),
+    )
+
+
 class KnownAlgorithmLibrary:
     """Micro GraphRAG: problem key -> verified parameterized generators."""
 
@@ -858,6 +949,7 @@ class KnownAlgorithmLibrary:
             "weighted_threshold": weighted_threshold_candidate_qubo(),
             "majority": majority_candidate_vote(),
             "hamming_distance": hamming_distance_candidate_ripple(),
+            "band_threshold": band_threshold_candidate_ripple(),
         }
 
     def synthesize(self, problem_key: str, n: int) -> Candidate:
