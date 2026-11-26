@@ -52,11 +52,11 @@ from qac.library import increment_candidate_ancilla as _inc_cand
 from qac.inventions import (
     inventions, sota_inventions, topwrite_ctrl_increment, topwrite_negate,
     topwrite_popcount, compare_carry, compare_topcarry, lean_mod_adder, lessthan_fused,
-    majority_pruned,
+    majority_pruned, weighted_pruned,
 )
 from qac.library import (
     ctrl_increment_spec, negate_spec, compare_spec, popcount_spec, popcount_m,
-    lessthan_spec, majority_spec,
+    lessthan_spec, majority_spec, weighted_threshold_spec,
 )
 from qac.sota_baselines import (
     sota_baselines, CUCCARO_CITATION, CITATION_SHA256,
@@ -1366,6 +1366,82 @@ class TestMajorityPruned:
         assert cand.id == "invented:majority-pruned"
         for n in (1, 2, 3, 4, 5, 7):
             assert cand.spec(n) == majority_spec(n)
+            assert cand.n_data(n) == n + 1
+            built = cand.build(n)
+            assert cand.ancilla(n) == list(range(n + 1, built.n))
+
+
+class TestWeightedPruned:
+    """flag ^= [sum (i+1)x_i >= theta] with a reachability-pruned accumulator.
+
+    The reference runs a full t-bit ripple carry add for every binary digit of
+    every weight. But the accumulator starts at zero, so before the term 2^p is
+    added it is bounded by the sum of earlier terms: any carry level above
+    floor(log2(bound + 2^p)) is provably zero on every basis input and is
+    deleted, not optimized. The topmost live carry is top-written.
+    """
+
+    # Machine-measured costs (n -> width, toffoli, gates, depth).
+    PINNED = {
+        1: (2, 0, 1, 1), 2: (5, 1, 7, 5), 3: (8, 11, 23, 20), 4: (11, 15, 33, 26),
+        5: (12, 27, 49, 38), 6: (14, 43, 79, 68), 7: (16, 73, 123, 110),
+        8: (18, 81, 143, 124), 9: (20, 105, 177, 158), 10: (21, 127, 211, 188),
+        11: (24, 171, 291, 262), 12: (25, 195, 321, 292),
+    }
+
+    def test_exhaustive_semantics_n1_to_6(self):
+        # Width n+1+t+... = 14 at n = 6 is the sandbox dense limit; n = 1 is the
+        # theta = 0 special case (flag flips unconditionally).
+        for n in range(1, 7):
+            rep = check_semantics(weighted_pruned(n), weighted_threshold_spec(n), n + 1)
+            assert rep.ok, (n, rep.reasons[:3])
+
+    def test_cost_profile_pinned(self):
+        for n in range(1, 13):
+            r = _resources(weighted_pruned(n))
+            got = (r["width"], r["toffoli"], r["gates"], r["depth"])
+            assert got == self.PINNED[n], (n, got, self.PINNED[n])
+
+    def test_dominates_textbook_and_tuned_baseline_every_size(self):
+        known = KnownAlgorithmLibrary().synthesize("weighted_threshold", 1).build
+        fixed = specialized_baselines(KnownAlgorithmLibrary())["weighted_threshold"].build
+        for n in range(1, 13):
+            a = _resources(weighted_pruned(n))
+            ka = (a["width"], a["toffoli"], a["gates"], a["depth"])
+            for rival in (known(n), fixed(n)):
+                b = _resources(rival)
+                kb = (b["width"], b["toffoli"], b["gates"], b["depth"])
+                assert all(p <= q for p, q in zip(ka, kb)), (n, ka, kb)
+
+    def test_savings_grow_with_n(self):
+        # Deletion, not optimization: the deeper the mixed-radix sum grows, the
+        # more carry levels die before they could ever fire.
+        known = KnownAlgorithmLibrary().synthesize("weighted_threshold", 1).build
+        for n in (3, 6, 10, 12):
+            assert weighted_pruned(n).toffoli_count() < known(n).toffoli_count(), n
+        assert (known(12).toffoli_count() - weighted_pruned(12).toffoli_count()
+                > known(3).toffoli_count() - weighted_pruned(3).toffoli_count())
+
+    def test_triple_certified_all_four_axes_strict(self):
+        cand = inventions()["weighted_threshold"][0][0]
+        assert cand.id == "invented:weighted-pruned"
+        rep = evaluate_candidate(cand, sizes=tuple(range(1, 7)))
+        assert rep.passed, rep.failure_reasons
+        cert = certify_innovation(cand, report=rep, extended_sizes=tuple(range(1, 7)))
+        assert cert.certified, cert.reasons
+        assert cert.correct and cert.valuable and cert.novel
+        assert cert.novelty_verdict == "distinct"
+        assert cert.pareto_strict_axes == ["depth", "gates", "toffoli", "width"]
+        assert cert.dominated_baselines == [
+            "known:weighted-threshold", "reference:fixed-width-weighted",
+        ]
+
+    def test_registry_binding_matches_weighted_contract(self):
+        cand, sizes = inventions()["weighted_threshold"][0]
+        assert sizes == (1, 2, 3, 4, 5, 6)
+        assert cand.id == "invented:weighted-pruned"
+        for n in (1, 2, 3, 5, 6):
+            assert cand.spec(n) == weighted_threshold_spec(n)
             assert cand.n_data(n) == n + 1
             built = cand.build(n)
             assert cand.ancilla(n) == list(range(n + 1, built.n))

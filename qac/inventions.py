@@ -27,7 +27,8 @@ from __future__ import annotations
 from .arithmetic import threshold_flag
 from .kickmix import CNOT, Circuit, Toffoli, X
 from .library import (Candidate, KnownAlgorithmLibrary, lessthan_k, lessthan_spec,
-                      majority_K, majority_spec, popcount_m)
+                      majority_K, majority_spec, popcount_m, weighted_t,
+                      weighted_theta, weighted_threshold_spec)
 from .sota_baselines import _maj, _uma, mod_adder_spec
 from .track_b import _topwrite_increment
 
@@ -43,6 +44,8 @@ __all__ = [
     "lean_mod_adder_candidate",
     "majority_pruned",
     "majority_pruned_candidate",
+    "weighted_pruned",
+    "weighted_pruned_candidate",
     "inventions",
     "sota_inventions",
 ]
@@ -472,6 +475,104 @@ def majority_pruned_candidate() -> Candidate:
 
 
 # ---------------------------------------------------------------------------
+# 9. Weighted threshold: reachability-pruned weighted accumulator.
+# ---------------------------------------------------------------------------
+
+def _pruned_cadd(q: int, p: int, base: int, slot: int, t: int,
+                 bound_before: int) -> list:
+    """Controlled add of 2^p into the accumulator, live carry levels only.
+
+    ``bound_before`` is the largest value the accumulator can hold before this
+    term is added, so the carry into level j is provably 0 whenever
+    2^j > bound_before + 2^p.  Levels above L = floor(log2(bound_before+2^p))
+    are never allocated; the topmost live carry is written straight into the
+    accumulator bit L (top-write), so the chain needs no slot there and no
+    uncompute Toffoli.
+    """
+    L = (bound_before + (1 << p)).bit_length() - 1
+    if L > t - 1:
+        L = t - 1
+    if L <= p:                                   # no live carry at all
+        return [CNOT(q, base + p)]
+    if L == p + 1:                               # single level: pure top-write
+        return [Toffoli(q, base + p, base + L), CNOT(q, base + p)]
+
+    def c(j: int) -> int:
+        return slot + j - p - 1
+
+    seq: list = [Toffoli(q, base + p, c(p + 1))]  # c_{p+1} = q & a_p
+    for j in range(p + 1, L - 1):                 # c_{j+1} = a_j & c_j
+        seq.append(Toffoli(base + j, c(j), c(j + 1)))
+    seq.append(Toffoli(base + L - 1, c(L - 1), base + L))  # top-write c_L
+    for j in range(L - 1, p, -1):                 # sums top-down + uncompute
+        seq.append(CNOT(c(j), base + j))
+        if j - 1 == p:
+            seq.append(Toffoli(q, base + p, c(j)))
+        else:
+            seq.append(Toffoli(base + j - 1, c(j - 1), c(j)))
+    seq.append(CNOT(q, base + p))                 # a_p ^= q
+    return seq
+
+
+def weighted_pruned(n: int) -> Circuit:
+    """Weighted-threshold oracle with a reachability-pruned accumulator.
+
+    Contract (``weighted_threshold_spec``): x = bits 0..n-1, flag = bit n,
+    flag ^= [sum_i (i+1) * x_i >= theta] with theta = floor(n(n+1)/4).
+
+    The textbook oracle runs a full t-bit controlled ripple add for every
+    binary digit of every weight, on every input.  But the accumulator starts
+    at zero and grows by at most one term at a time, so before the term
+    carrying weight 2^p the accumulator is bounded by the sum of the terms
+    already added.  Every carry level above floor(log2(bound_before + 2^p))
+    is then a provable no-op on all basis inputs and is deleted, not
+    optimized: the same reachability argument as ``majority_pruned``, applied
+    to a mixed-radix sum.  The topmost live carry is top-written into the
+    accumulator, removing its slot and its uncompute Toffoli; the threshold
+    step then reuses the same carry region in OR-marker mode.
+
+    Cost at n = 2..12 (W/T/G/D): (5,1,7,5), (8,11,23,20), (11,15,33,26),
+    (12,27,49,38), (14,43,79,68), (16,73,123,110), (18,81,143,124),
+    (20,105,177,158), (21,127,211,188), (24,171,291,262), (25,195,321,292).
+    At n = 10 the textbook oracle costs (23,262,433,387) and the tuned
+    fixed-width baseline (21,227,359,336); this construction is (21,127,211,188)
+    -- weak dominance on all four axes with strict depth, gates and Toffolis.
+
+    Verified exhaustively on all 2^n inputs for n = 1..6 (width 14 at n = 6 is
+    the sandbox dense limit); cost profile pinned to n = 12.
+    """
+    if n == 1:  # theta = 0: [s >= 0] is always 1, flag flips unconditionally
+        return Circuit(2, [X(1)])
+    t, theta = weighted_t(n), weighted_theta(n)
+    flag, base = n, n + 1
+    slot = base + t
+    adds: list = []
+    bound = 0
+    for i in range(n):
+        w = i + 1
+        for p in range(w.bit_length()):
+            if (w >> p) & 1:
+                adds += _pruned_cadd(i, p, base, slot, t, bound)
+                bound += 1 << p
+    mark = threshold_flag(tuple(range(base, base + t)), theta, flag, slot,
+                          fuse=True, polarity=False)
+    gates = adds + mark + list(reversed(adds))
+    width = max(gate.targets()[0] for gate in gates) + 1
+    return Circuit(max(width, flag + 1), gates)
+
+
+def weighted_pruned_candidate() -> Candidate:
+    return Candidate(
+        "invented:weighted-pruned",
+        "B",
+        weighted_pruned,
+        weighted_threshold_spec,
+        lambda n: n + 1,
+        lambda n: [] if n == 1 else list(range(n + 1, weighted_pruned(n).n)),
+    )
+
+
+# ---------------------------------------------------------------------------
 # Registry: problem key -> (candidate_id, builder, pinned sizes for verification)
 # ---------------------------------------------------------------------------
 
@@ -512,6 +613,10 @@ def inventions() -> dict[str, list[tuple[Candidate, tuple[int, ...]]]]:
         "majority": [
             (_bind("majority", "invented:majority-pruned", majority_pruned),
              (1, 2, 3, 4, 5, 6, 7)),
+        ],
+        "weighted_threshold": [
+            (_bind("weighted_threshold", "invented:weighted-pruned", weighted_pruned),
+             (1, 2, 3, 4, 5, 6)),
         ],
     }
 
