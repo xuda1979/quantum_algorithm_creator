@@ -6,9 +6,9 @@
 2. **搜索**同一功能下更省资源的参数化线路（Track B）；
 3. 用**确定性机器检查**判断某条线路是否“正确、有价值、结构上新”（三重条件），只有全部通过才允许称为一项成果。
 
-所有结论都由代码现场跑出来，不靠口头声明。当前实现是纯 Python 标准库 + numpy，测试共 **152 项**（`tests/test_qac.py` 133 项 + `tests/test_evolution.py` 19 项），全部通过。
+所有结论都由代码现场跑出来，不靠口头声明。当前实现是纯 Python 标准库 + numpy，测试共 **158 项**（`tests/test_qac.py` 139 项 + `tests/test_evolution.py` 19 项），全部通过。
 
-**本轮结果。** 在 12 个同规约基线之上，机器认证了 **17 条新构造**：多数阈值、加权阈值、定值比较（进化版 `optimized:less_than:1-0` 与可直接调用的手推版 `invented:less_than`，两者逐尺寸资源完全相同）、常数加法，四个“顶写族”——受控增量器、取负器、汉明重量计数器、比较器（比较器有两个递进构造：先 `invented:compare-carry`，再 `invented:compare-topcarry`，后者把最高位进位直接折进标志位，见[四个顶写族新构造](#四个顶写族新构造)），精简模加法器 `invented:modadd-lean`（同规约战胜 CDKM 基线，见[模加法器](#模加法器-inventedmodadd-lean)），以及多数器与加权阈值各一条“可达性剪枝”新构造（可证明恒为零的进位级被直接删除，见[多数阈值剪枝计数器](#多数阈值剪枝计数器-inventedmajority-pruned) 与 [加权阈值剪枝累加器](#加权阈值剪枝累加器-inventedweighted-pruned)）。在 `n=10` 的加权阈值任务上，剪枝累加器把 Toffoli 从教科书基线的 **262** 降到 **127**、从调优固定宽度基线的 **227** 降到 **127**，逻辑深度从 **387 / 336** 降到 **188**，宽度为 **21**；在同一尺寸的多数阈值任务上，剪枝计数器把 Toffoli 从教科书基线的 **126** 降到 **63**、从调优固定宽度基线的 **105** 降到 **63**（见上方对比表）。每个新族都在每个验证尺寸上严格占优其同规约教科书实现。
+**本轮结果。** 在 12 个同规约基线之上，机器认证了 **18 条新构造**：多数阈值、加权阈值、定值比较（进化版 `optimized:less_than:1-0` 与可直接调用的手推版 `invented:less_than`，两者逐尺寸资源完全相同）、常数加法，四个“顶写族”——受控增量器、取负器、汉明重量计数器、比较器（比较器有两个递进构造：先 `invented:compare-carry`，再 `invented:compare-topcarry`，后者把最高位进位直接折进标志位，见[四个顶写族新构造](#四个顶写族新构造)），精简模加法器 `invented:modadd-lean`（同规约战胜 CDKM 基线，见[模加法器](#模加法器-inventedmodadd-lean)），以及多数器与加权阈值各一条“可达性剪枝”新构造（可证明恒为零的进位级被直接删除，见[多数阈值剪枝计数器](#多数阈值剪枝计数器-inventedmajority-pruned) 与 [加权阈值剪枝累加器](#加权阈值剪枝累加器-inventedweighted-pruned)）。在 `n=10` 的加权阈值任务上，剪枝累加器把 Toffoli 从教科书基线的 **262** 降到 **127**、从调优固定宽度基线的 **227** 降到 **127**，逻辑深度从 **387 / 336** 降到 **188**，宽度为 **21**；在同一尺寸的多数阈值任务上，剪枝计数器把 Toffoli 从教科书基线的 **126** 降到 **63**、从调优固定宽度基线的 **105** 降到 **63**（见上方对比表）。每个新族都在每个验证尺寸上严格占优其同规约教科书实现。
 
 ## 目录
 
@@ -19,6 +19,7 @@
 - [四个顶写族新构造](#四个顶写族新构造)
 - [多数阈值剪枝计数器](#多数阈值剪枝计数器-inventedmajority-pruned)
 - [加权阈值剪枝累加器](#加权阈值剪枝累加器-inventedweighted-pruned)
+- [加权阈值·最小项优先](#加权阈值最小项优先-inventedweighted-lowfirst)
 - [五个进化构造详解](#五个进化构造详解)
 - [常数加法器：顶写融合](#常数加法器顶写融合)
 - [完整逐尺寸实测](#完整逐尺寸实测)
@@ -43,7 +44,7 @@ python3 -m qac.cli audit --sizes 1,2,3,4,5,6,7,8     # 复核两种历史增量�
 python3 -m qac.cli search majority --seed 7 --holdout 6,7,8,10
 python3 -m qac.cli search weighted_threshold --seed 7 --holdout 6,7,8,10
 python3 -m qac.cli search less_than --seed 7 --holdout 6,7,8,10
-python3 -m pytest tests/ -q                          # 152 项测试
+python3 -m pytest tests/ -q                          # 158 项测试
 ```
 
 可选的真实 Qiskit 交叉复核（独立虚拟环境即可）：
@@ -129,6 +130,7 @@ flowchart TD
 | `invented:modadd-lean` | 模加法 `(a,b) → (a, a+b mod 2^n)` | certified | `sota:cdkm-mod-adder` | W、T、G、D |
 | `invented:majority-pruned` | 多数阈值 `flag ^= [popcount(x) ≥ ⌈n/2⌉]`（可达性剪枝计数器） | certified | `known:majority-vote`、`reference:fixed-width-majority` | T、G、D（W 持平） |
 | `invented:weighted-pruned` | 加权阈值 `flag ^= [Σ(i+1)x_i ≥ ⌊n(n+1)/4⌋]`（可达性剪枝累加器） | certified | `known:weighted-threshold`、`reference:fixed-width-weighted` | W、T、G、D |
+| `invented:weighted-lowfirst` | 加权阈值 `flag ^= [Σ(i+1)x_i ≥ ⌊n(n+1)/4⌋]`（剪枝累加器·最小项优先） | certified | `known:weighted-threshold`、`reference:fixed-width-weighted`、`invented:weighted-pruned` | T、G、D（W 持平） |
 
 每一行的完整逐尺寸资源表都在[四个顶写族新构造](#四个顶写族新构造)与[五个进化构造详解](#五个进化构造详解)中，认证回执由 `qac/inventions.py` 与 `tests/test_qac.py` 现场签发。
 
@@ -528,6 +530,49 @@ n ≥ 2:  MAJ(a_0, b_0, h)
 四条轴全部弱占优，且**四条轴都在证书里判为严格更优**：宽度不劣于两个基线（`n = 6, 8` 等尺寸上更窄，其余持平，因为两边都被 `compact_circuit` 裁到真实宽度），Toffoli、门数、深度在每个尺寸上更少。差距随 `n` 迅速拉大（`n = 10` 时相对教科书省 `T 135、G 222、D 199`，相对调优固定宽度基线省 `T 100、G 148、D 148`）：平方级求和的项数越来越多，被“可达上界”证明恒零的高位进位也越来越多，`n = 12` 时教科书需要 `416` 个 Toffoli，而本构造只需 `195`。证书：四项判定全真，`distinct`，同时占优 `known:weighted-threshold` 与 `reference:fixed-width-weighted`，`pareto_strict_axes = ["depth", "gates", "toffoli", "width"]`。逐基态稠密检查 `n=1..6`（宽度 `n+1+t ≤ 14`），`n=1..12` 资源表、两基线逐尺寸弱占优与四项严格证书由 `TestWeightedPruned` 钉住。
 
 **可迁移的洞见。** “先证明某个中间量恒为零，再把它整段删掉”不依赖具体的加法结构：只要累加器有已知的数值上界，任何受控进位的级别都可以按上界剪枝。这把第 16 项（多数阈值）的论证真正推广到了权重不等的求和。
+
+### 加权阈值·最小项优先 `invented:weighted-lowfirst`
+
+契约与上一条完全相同（`weighted_threshold_spec`），剪枝规则也完全相同；**唯一改变的是各项的累加顺序**。这一改把上一条构造里被浪费掉的一大半 Toffoli 直接删掉，而且在证书里把上一条构造本身作为同规约基线一并占优。
+
+**为什么顺序会改变剪枝量。** 最高活进位级由
+
+```text
+L = ⌊log₂(bound_before + 2^p)⌋
+```
+
+决定，而 `bound_before` 是“已经加进去的那些项之和”。剪枝能删掉多少级，只取决于 `bound_before` 涨得多快。`bound_before` 单调不减，所以**越小的项越应该先加**：把全部权重为 1 的项（输入 `x_0`）先加完，再加权重为 2 的项（`x_1`），再权重 4、8……，这样累加器在求和的每一个前缀上都尽可能低，被证明恒为零的高位进位就最多。形式化地说，把项按 `(p, i)` 字典序排序，是让每个前缀的上界最小的贪心顺序。上一条构造沿用“按输入编号、再按位”的值序 `(i, p)`，在很多前缀上把大权重早早压进累加器，白白抬高了 `L`。
+
+**代价几乎为零。** 顺序只在构造时决定门序列的排列，不增加任何辅助位、不增加任何门种，宽度与上一条构造逐尺寸完全相同；实际线路仍以“累加全部项 → 标记阈值 → 全部项倒序还原”的整体形式出现，可逆性不变。
+
+```text
+terms = sorted((p, i) for i in 0..n-1 for p in set bits of (i+1))   # (p, i) 字典序
+bound = 0
+对 terms 里的每一项 (p, i)：
+  L = floor(log2(bound + 2^p))，以 t-1 封顶     # 剩下的部分与上一条完全相同
+  调用同一段可达性剪枝受控加法 _cadd(i, p, ...)
+  bound += 2^p
+阈值步骤与全部倒序还原同 `invented:weighted-pruned`
+```
+
+| n | 最小项优先 W/T/G/D | 值序剪枝（上一条） W/T/G/D | 教科书 W/T/G/D | 调优基线 W/T/G/D |
+|---|---|---|---|---|
+| 1 | 2/0/1/1 | 2/0/1/1 | 2/0/1/1 | 2/0/1/1 |
+| 2 | 5/1/7/5 | 5/1/7/5 | 7/6/19/15 | 5/3/9/7 |
+| 3 | 8/9/19/16 | 8/11/23/20 | 10/28/55/45 | 8/19/33/28 |
+| 4 | 11/13/29/22 | 11/15/33/26 | 13/50/93/75 | 11/39/67/58 |
+| 5 | 12/17/33/26 | 12/27/49/38 | 14/66/117/97 | 12/51/83/70 |
+| 6 | 14/33/63/56 | 14/43/79/68 | 17/116/201/177 | 15/95/155/144 |
+| 7 | 15/59/101/94 | 16/73/123/110 | 18/152/257/229 | 16/125/199/186 |
+| 8 | 18/67/121/108 | 18/81/143/124 | 21/210/353/315 | 19/181/291/272 |
+| 9 | 19/79/137/126 | 20/105/177/158 | 22/238/395/355 | 20/205/325/306 |
+| 10 | 21/93/159/146 | 21/127/211/188 | 23/262/433/387 | 21/227/359/336 |
+| 11 | 24/133/233/218 | 24/171/291/262 | 26/388/639/581 | 24/347/553/524 |
+| 12 | 25/153/257/244 | 25/195/321/292 | 27/416/677/625 | 25/371/583/554 |
+
+宽度逐尺寸持平（`compact_circuit` 裁到真实宽度后两者不变），Toffoli、门数、深度从 `n = 3` 起**每个尺寸都严格更少**：`n = 10` 时 Toffoli 从 `127` 降到 `93`（再省 34，相对教科书共省 `169`），深度从 `188` 降到 `146`；`n = 12` 时从 `195` 降到 `153`。证书在同规约基线池里**额外加入上一条构造** `invented:weighted-pruned`，结果仍为四项判定全真、`distinct`，三条基线全部被占优，`pareto_strict_axes = ["depth", "gates", "toffoli"]`（宽度持平）。逐基态稠密检查 `n=1..6`、`n=1..12` 资源表与三基线逐尺寸弱占优由 `TestWeightedLowFirst` 钉住。
+
+**可迁移的洞见。** 可达性剪枝的强度是“上界上涨速度”的函数，而上界上涨速度是求和的**顺序**决定的。在累加器型线路里，顺序是一个免费的自由度：不改契约、不加辅助位、不加门种，仅靠让中间量晚一点变大，就能把可证明恒零的门再多删掉一批。这条经验对任何“独立项逐个并入有界累加器”的线路都成立。
 
 ## 五个进化构造详解
 
@@ -1204,7 +1249,7 @@ n=5 的实测值与上表闭式一致：`sota:cdkm-mod-adder` 为 `11/10/30/26`�
 | 3 | "三重认证门"含义宽泛，读起来像"任何新线路都能认证" | 三道门是并列必要条件，任一门不满足即 `certified=False`。且"真创新"有明确作用域：只在**同规约**基线池内查重；非同规约家族标 `literature_status="unassessed"` | [发现与认证机制](#发现与认证机制)；`test_correct_but_valueless_is_rejected`、`test_duplicate_of_known_is_not_novel` |
 | 4 | `compare` 的功能写作 `flag ← [x ≥ y]` | 实际契约是 `f ⊕= [x < y]`（`f` 初值为 0 时才等价于"小于"标志）。代码以 `compare_spec` 为准，测试按此逐输入核对 | `qac/library.py` |
 | 5 | `KnownAlgorithmLibrary().synthesize(key, n)` "返回 `Circuit`" | 返回的是 `Candidate`，且不吃 `n` 打样；要拿线路须调 `.build(n)`。属性是 `.id` 而非 `.candidate_id` | [调用方式（注意返回类型）](#调用方式注意返回类型) |
-| 6 | "78 项测试全部通过"；测试名 `test_portfolio_inventions_are_all_triple_certified` | 现为 **152 项**（`test_qac.py` 133 + `test_evolution.py` 19）；实际测试名是 `test_portfolio_optimizations_are_all_triple_certified` | `PYTHONPATH=. python3 -m pytest tests/ -q` |
+| 6 | "78 项测试全部通过"；测试名 `test_portfolio_inventions_are_all_triple_certified` | 现为 **158 项**（`test_qac.py` 139 + `test_evolution.py` 19）；实际测试名是 `test_portfolio_optimizations_are_all_triple_certified` | `PYTHONPATH=. python3 -m pytest tests/ -q` |
 
 除这六条外，旧版的架构图、分阶段计划、工程护栏和案例研究**仍然有效**，已分别整理进[路线图与阶段计划](#路线图与阶段计划)、[工程护栏](#工程护栏)和[真实案例](#真实案例ai-发现的新算法)。
 
@@ -1310,18 +1355,18 @@ quantum_algorithm_creator/
 │   ├── kickmix.py             #   Layer 3: 可逆/相位反冲快速模拟器 + Circuit 门原语
 │   ├── sandbox.py             #   Layer 3: 语义验证 + 缩放拟合 + 评估契约
 │   ├── novelty.py             #   三重认证门: 正确 × 有价值 × 真创新
-│   ├── inventions.py          #   四个顶写族新构造（比较器含两版）+ 手推定值比较 + 多数阈值剪枝计数器 + 加权阈值剪枝累加器
+│   ├── inventions.py          #   四个顶写族新构造（比较器含两版）+ 手推定值比较 + 多数阈值剪枝计数器 + 加权阈值剪枝累加器（含最小项优先版）
 │   ├── sota_baselines.py      #   文献 SOTA 基线（CDKM，带引用哈希）
 │   ├── portfolio.py           #   Layer 4: 排序解决方案组合 + 端到端流水线
 │   └── cli.py                 #   演示入口
 ├── benchmarks/
 │   └── qiskit_crosscheck.py   # 独立 Qiskit 复核（不进主测试套件，见下）
 └── tests/
-    ├── test_qac.py            # 133 项：库、沙箱、认证门、SOTA、新构造
+    ├── test_qac.py            # 139 项：库、沙箱、认证门、SOTA、新构造
     └── test_evolution.py      # 19 项：进化循环、存档、留出验证
 ```
 
-合计 12 个 qac 模块（约 3600 行）、2 个测试文件（152 项）、1 个可选基准脚本。各模块的文件规模：
+合计 12 个 qac 模块（约 3700 行）、2 个测试文件（158 项）、1 个可选基准脚本。各模块的文件规模：
 
 | 模块 | 行数 | 职责 |
 |---|---:|---|
@@ -1330,7 +1375,7 @@ quantum_algorithm_creator/
 | `sandbox.py` | 426 | `evaluate_candidate`、`fit_scaling`、语义/态矢量验证 |
 | `kickmix.py` | 318 | `Circuit`/`X`/`CNOT`/`Toffoli` 门原语、kickmix 模拟 |
 | `sota_baselines.py` | 218 | CDKM 转写 + 引用指纹 + 共享前缀参考 |
-| `inventions.py` | 633 | 四个顶写族新构造（比较器含 `compare-carry` / `compare-topcarry` 两版）+ 手推定值比较 `invented:less_than` + 多数阈值剪枝计数器 `invented:majority-pruned` + 加权阈值剪枝累加器 `invented:weighted-pruned` + 认证绑定 |
+| `inventions.py` | 702 | 四个顶写族新构造（比较器含 `compare-carry` / `compare-topcarry` 两版）+ 手推定值比较 `invented:less_than` + 多数阈值剪枝计数器 `invented:majority-pruned` + 加权阈值剪枝累加器 `invented:weighted-pruned` + 最小项优先版 `invented:weighted-lowfirst` + 认证绑定 |
 | `novelty.py` | 207 | `certify_innovation`、`InnovationCertificate` |
 | `arithmetic.py` | 169 | `SumProgram`/`ComparatorProgram` 与编译 |
 | `cli.py` | 122 | 演示入口 |
@@ -1347,7 +1392,7 @@ quantum_algorithm_creator/
 - **复现全部验证**：
 
   ```bash
-  PYTHONPATH=. python3 -m pytest tests/ -q     # 152 passed
+  PYTHONPATH=. python3 -m pytest tests/ -q     # 158 passed
   ```
 
 - **可选独立复核**（需要 Qiskit）：
@@ -1394,7 +1439,7 @@ git show 6871d639de2b2a02bebcf0ce210d28f5cc09e413:README.md
 | SOTA 基线（CDKM） | [对照文献 SOTA](#对照文献-sota) | 保留，补逐尺寸表与"恰好两个配对"结论 |
 | 分阶段开发计划（5 阶段） | [路线图与阶段计划](#路线图与阶段计划) | 保留，加"当前状态"列 |
 | 工程护栏（2 条） | [工程护栏](#工程护栏) | 保留，补实现细节与两条新增待办 |
-| 仓库结构 | [仓库结构](#仓库结构) | 更新：12 个 qac 模块、152 项测试 |
+| 仓库结构 | [仓库结构](#仓库结构) | 更新：12 个 qac 模块、158 项测试 |
 | 许可与引用 | 本节 | 保留并扩充 |
 
 </details>

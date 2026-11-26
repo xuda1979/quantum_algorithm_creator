@@ -46,6 +46,8 @@ __all__ = [
     "majority_pruned_candidate",
     "weighted_pruned",
     "weighted_pruned_candidate",
+    "weighted_pruned_lowfirst",
+    "weighted_pruned_lowfirst_candidate",
     "inventions",
     "sota_inventions",
 ]
@@ -573,6 +575,70 @@ def weighted_pruned_candidate() -> Candidate:
 
 
 # ---------------------------------------------------------------------------
+# 10. Weighted threshold: smallest-term-first (low-first) pruned accumulator.
+# ---------------------------------------------------------------------------
+
+def weighted_pruned_lowfirst(n: int) -> Circuit:
+    """Weighted-threshold oracle: pruned accumulator, smallest term first.
+
+    Same contract and the same reachability-pruning rule as
+    ``weighted_pruned``; only the order in which the weighted terms
+    2^p * x_i are accumulated changes.
+
+    The pruning power depends on how fast ``bound_before`` grows: the live
+    carry height of the next term is L = floor(log2(bound_before + 2^p)), so
+    adding the smallest remaining terms first keeps the accumulator low for
+    longer and leaves more carry levels provably zero.  Sorting the terms by
+    (p, i) -- all weight-1 terms, then all weight-2 terms, then weight-4, ...
+    -- is the greedy order that minimises the running bound at every prefix of
+    the sum, and it strictly beats the value order (i, p) used by
+    ``weighted_pruned`` from n = 3 on, on Toffolis, gates and depth, at equal
+    width.
+
+    Cost at n = 2..12 (W/T/G/D): (5,1,7,5), (8,9,19,16), (11,13,29,22),
+    (12,17,33,26), (14,33,63,56), (15,59,101,94), (18,67,121,108),
+    (19,79,137,126), (21,93,159,146), (24,133,233,218), (25,153,257,244).
+    At n = 10 that is 93 Toffolis against 127 for the value-ordered pruned
+    accumulator, 262 for the textbook oracle and 227 for the tuned baseline.
+
+    Verified exhaustively on all 2^n inputs for n = 1..6; cost profile pinned
+    to n = 12.
+    """
+    if n == 1:  # theta = 0: [s >= 0] is always 1, flag flips unconditionally
+        return Circuit(2, [X(1)])
+    t, theta = weighted_t(n), weighted_theta(n)
+    flag, base = n, n + 1
+    slot = base + t
+    terms = sorted(
+        (p, i)
+        for i in range(n)
+        for p in range((i + 1).bit_length())
+        if ((i + 1) >> p) & 1
+    )
+    adds: list = []
+    bound = 0
+    for p, i in terms:
+        adds += _pruned_cadd(i, p, base, slot, t, bound)
+        bound += 1 << p
+    mark = threshold_flag(tuple(range(base, base + t)), theta, flag, slot,
+                          fuse=True, polarity=False)
+    gates = adds + mark + list(reversed(adds))
+    width = max(gate.targets()[0] for gate in gates) + 1
+    return Circuit(max(width, flag + 1), gates)
+
+
+def weighted_pruned_lowfirst_candidate() -> Candidate:
+    return Candidate(
+        "invented:weighted-lowfirst",
+        "B",
+        weighted_pruned_lowfirst,
+        weighted_threshold_spec,
+        lambda n: n + 1,
+        lambda n: [] if n == 1 else list(range(n + 1, weighted_pruned_lowfirst(n).n)),
+    )
+
+
+# ---------------------------------------------------------------------------
 # Registry: problem key -> (candidate_id, builder, pinned sizes for verification)
 # ---------------------------------------------------------------------------
 
@@ -616,6 +682,9 @@ def inventions() -> dict[str, list[tuple[Candidate, tuple[int, ...]]]]:
         ],
         "weighted_threshold": [
             (_bind("weighted_threshold", "invented:weighted-pruned", weighted_pruned),
+             (1, 2, 3, 4, 5, 6)),
+            (_bind("weighted_threshold", "invented:weighted-lowfirst",
+                   weighted_pruned_lowfirst),
              (1, 2, 3, 4, 5, 6)),
         ],
     }

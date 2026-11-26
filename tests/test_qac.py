@@ -52,7 +52,7 @@ from qac.library import increment_candidate_ancilla as _inc_cand
 from qac.inventions import (
     inventions, sota_inventions, topwrite_ctrl_increment, topwrite_negate,
     topwrite_popcount, compare_carry, compare_topcarry, lean_mod_adder, lessthan_fused,
-    majority_pruned, weighted_pruned,
+    majority_pruned, weighted_pruned, weighted_pruned_lowfirst,
 )
 from qac.library import (
     ctrl_increment_spec, negate_spec, compare_spec, popcount_spec, popcount_m,
@@ -1440,6 +1440,83 @@ class TestWeightedPruned:
         cand, sizes = inventions()["weighted_threshold"][0]
         assert sizes == (1, 2, 3, 4, 5, 6)
         assert cand.id == "invented:weighted-pruned"
+        for n in (1, 2, 3, 5, 6):
+            assert cand.spec(n) == weighted_threshold_spec(n)
+            assert cand.n_data(n) == n + 1
+            built = cand.build(n)
+            assert cand.ancilla(n) == list(range(n + 1, built.n))
+
+
+class TestWeightedLowFirst:
+    """Same pruned accumulator, but the arithmetic terms are added smallest first.
+
+    The reachability bound only grows, so the live carry height
+    L = floor(log2(bound_before + 2^p)) is monotone in how much weight has been
+    accumulated. Feeding the terms in (p, i) order keeps the accumulator low for
+    the longest possible prefix of the sum, which kills strictly more carry
+    levels than the value order at equal width.
+    """
+
+    PINNED = {
+        1: (2, 0, 1, 1), 2: (5, 1, 7, 5), 3: (8, 9, 19, 16), 4: (11, 13, 29, 22),
+        5: (12, 17, 33, 26), 6: (14, 33, 63, 56), 7: (15, 59, 101, 94),
+        8: (18, 67, 121, 108), 9: (19, 79, 137, 126), 10: (21, 93, 159, 146),
+        11: (24, 133, 233, 218), 12: (25, 153, 257, 244),
+    }
+
+    def test_exhaustive_semantics_n1_to_6(self):
+        for n in range(1, 7):
+            rep = check_semantics(weighted_pruned_lowfirst(n), weighted_threshold_spec(n),
+                                  n + 1)
+            assert rep.ok, (n, rep.reasons[:3])
+
+    def test_cost_profile_pinned(self):
+        for n in range(1, 13):
+            r = _resources(weighted_pruned_lowfirst(n))
+            got = (r["width"], r["toffoli"], r["gates"], r["depth"])
+            assert got == self.PINNED[n], (n, got, self.PINNED[n])
+
+    def test_dominates_textbook_tuned_and_value_order_sibling(self):
+        known = KnownAlgorithmLibrary().synthesize("weighted_threshold", 1).build
+        fixed = specialized_baselines(KnownAlgorithmLibrary())["weighted_threshold"].build
+        for n in range(1, 13):
+            a = _resources(weighted_pruned_lowfirst(n))
+            ka = (a["width"], a["toffoli"], a["gates"], a["depth"])
+            for rival in (known(n), fixed(n), weighted_pruned(n)):
+                b = _resources(rival)
+                kb = (b["width"], b["toffoli"], b["gates"], b["depth"])
+                assert all(p <= q for p, q in zip(ka, kb)), (n, ka, kb)
+
+    def test_ordering_strictly_cuts_toffolis_from_n3(self):
+        for n in range(3, 13):
+            assert (weighted_pruned_lowfirst(n).toffoli_count()
+                    < weighted_pruned(n).toffoli_count()), n
+        assert weighted_pruned_lowfirst(10).toffoli_count() == 93
+        assert weighted_pruned(10).toffoli_count() == 127
+
+    def test_triple_certified_against_value_order_sibling(self):
+        lib = KnownAlgorithmLibrary()
+        cand = inventions()["weighted_threshold"][1][0]
+        assert cand.id == "invented:weighted-lowfirst"
+        rep = evaluate_candidate(cand, sizes=tuple(range(1, 7)))
+        assert rep.passed, rep.failure_reasons
+        pool = [*lib.candidates(), *sota_baselines(), *specialized_baselines(lib).values(),
+                inventions()["weighted_threshold"][0][0]]
+        cert = certify_innovation(cand, report=rep, baseline_candidates=pool,
+                                  extended_sizes=tuple(range(1, 7)))
+        assert cert.certified, cert.reasons
+        assert cert.correct and cert.valuable and cert.novel
+        assert cert.novelty_verdict == "distinct"
+        assert cert.pareto_strict_axes == ["depth", "gates", "toffoli"]
+        assert cert.dominated_baselines == [
+            "known:weighted-threshold", "reference:fixed-width-weighted",
+            "invented:weighted-pruned",
+        ]
+
+    def test_registry_binding_matches_weighted_contract(self):
+        cand, sizes = inventions()["weighted_threshold"][1]
+        assert sizes == (1, 2, 3, 4, 5, 6)
+        assert cand.id == "invented:weighted-lowfirst"
         for n in (1, 2, 3, 5, 6):
             assert cand.spec(n) == weighted_threshold_spec(n)
             assert cand.n_data(n) == n + 1
